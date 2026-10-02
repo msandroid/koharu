@@ -15,6 +15,7 @@ use koharu_ml::{
     aot_inpainting::AotInpainting,
     flux2_klein::{Flux2KleinInpaint, Flux2KleinInpaintOptions},
     lama::{InpaintRequest, LaMa},
+    onnx::LaMaOnnx,
     rorem_mixed::{DEFAULT_NEGATIVE_PROMPT, DEFAULT_PROMPT, RoremMixed, RoremMixedOptions},
 };
 use koharu_scene::{
@@ -68,7 +69,9 @@ pub(super) struct Processor {
 impl Processor {
     pub(super) fn new(config: InpaintingModel, device: koharu_ml::Device) -> Result<Self> {
         match &config {
-            InpaintingModel::LaMa {} | InpaintingModel::AotInpainting {} => {}
+            InpaintingModel::LaMa {}
+            | InpaintingModel::LaMaOnnx {}
+            | InpaintingModel::AotInpainting {} => {}
             InpaintingModel::Flux2Klein(settings) => {
                 ensure!(
                     !settings.prompt.contains('\0'),
@@ -96,6 +99,7 @@ impl StageProcessor for Processor {
     fn model(&self) -> &'static str {
         match self.config {
             InpaintingModel::LaMa {} => "lama",
+            InpaintingModel::LaMaOnnx {} => "lama-onnx",
             InpaintingModel::AotInpainting {} => "aot-inpainting",
             InpaintingModel::Flux2Klein(_) => "flux2-klein",
             InpaintingModel::RoremMixed(_) => "rorem-mixed",
@@ -143,6 +147,7 @@ impl StageProcessor for Processor {
 
 enum Model {
     LaMa(Arc<Mutex<LaMa>>),
+    LaMaOnnx(Arc<Mutex<LaMaOnnx>>),
     Aot(Arc<Mutex<AotInpainting>>),
     Flux {
         model: Arc<Mutex<Flux2KleinInpaint>>,
@@ -160,6 +165,9 @@ impl Model {
             InpaintingModel::LaMa {} => {
                 Ok(Self::LaMa(Arc::new(Mutex::new(LaMa::load(device).await?))))
             }
+            InpaintingModel::LaMaOnnx {} => Ok(Self::LaMaOnnx(Arc::new(Mutex::new(
+                LaMaOnnx::load().await?,
+            )))),
             InpaintingModel::AotInpainting {} => Ok(Self::Aot(Arc::new(Mutex::new(
                 AotInpainting::load(device).await?,
             )))),
@@ -188,6 +196,31 @@ impl Model {
                 let model = model.clone();
                 (
                     "lama",
+                    tokio_rayon::spawn(move || -> Result<DynamicImage> {
+                        let model = model
+                            .lock()
+                            .map_err(|_| anyhow!("LaMa model lock is poisoned"))?;
+                        inpaint_tiled(
+                            &prepared.image,
+                            &prepared.mask,
+                            &prepared.text_mask,
+                            &prepared.flat_fill_regions,
+                            |image, mask| {
+                                Ok(DynamicImage::ImageRgb8(model.inference(
+                                    image,
+                                    mask,
+                                    &InpaintRequest::default(),
+                                )?))
+                            },
+                        )
+                    })
+                    .await?,
+                )
+            }
+            Self::LaMaOnnx(model) => {
+                let model = model.clone();
+                (
+                    "lama-onnx",
                     tokio_rayon::spawn(move || -> Result<DynamicImage> {
                         let model = model
                             .lock()

@@ -27,6 +27,7 @@ encoding_rs = { workspace = true }
 fast_image_resize = { workspace = true }
 minijinja = { workspace = true }
 minijinja-contrib = { workspace = true }
+ort = { workspace = true }
 rayon = { workspace = true }
 schemars = { workspace = true }
 serde = { workspace = true }

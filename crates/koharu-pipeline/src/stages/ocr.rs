@@ -6,7 +6,7 @@ use anyhow::{Context as _, Result, anyhow, bail};
 use async_trait::async_trait;
 use image::DynamicImage;
 use koharu_ml::{
-    baberu_ocr::BaberuOcr, hayai_ocr::HayaiOcr, manga_ocr::MangaOcr,
+    baberu_ocr::BaberuOcr, hayai_ocr::HayaiOcr, manga_ocr::MangaOcr, onnx::MangaOcrOnnx,
     paddle_ocr_vl::PaddleOCRVLTask, paddle_ocr_vl_quantized::PaddleOCRVLQuantized,
 };
 use koharu_scene::{
@@ -37,6 +37,7 @@ impl StageProcessor for Processor {
     fn model(&self) -> &'static str {
         match self.config {
             OcrModel::MangaOcr => "manga-ocr",
+            OcrModel::MangaOcrOnnx => "manga-ocr-onnx",
             OcrModel::BaberuOcr => "baberu-ocr",
             OcrModel::HayaiOcr => "hayai-ocr",
             OcrModel::PaddleOcrVl1_6 => "paddleocr-vl-1.6",
@@ -66,6 +67,7 @@ impl StageProcessor for Processor {
 
 enum Model {
     Manga(Arc<Mutex<MangaOcr>>),
+    MangaOnnx(Arc<Mutex<MangaOcrOnnx>>),
     Baberu(Arc<Mutex<BaberuOcr>>),
     Hayai(Arc<Mutex<HayaiOcr>>),
     Paddle(Arc<Mutex<PaddleOCRVLQuantized>>),
@@ -76,6 +78,9 @@ impl Model {
         match config {
             OcrModel::MangaOcr => Ok(Self::Manga(Arc::new(Mutex::new(
                 MangaOcr::load(device).await?,
+            )))),
+            OcrModel::MangaOcrOnnx => Ok(Self::MangaOnnx(Arc::new(Mutex::new(
+                MangaOcrOnnx::load().await?,
             )))),
             OcrModel::BaberuOcr => Ok(Self::Baberu(Arc::new(Mutex::new(
                 BaberuOcr::load(device).await?,
@@ -92,6 +97,7 @@ impl Model {
     async fn run(&self, input: StageInput) -> Result<koharu_scene::Patch> {
         let model_name = match self {
             Self::Manga(_) => "manga-ocr",
+            Self::MangaOnnx(_) => "manga-ocr-onnx",
             Self::Baberu(_) => "baberu-ocr",
             Self::Hayai(_) => "hayai-ocr",
             Self::Paddle(_) => "paddleocr-vl-1.6",
@@ -142,6 +148,12 @@ impl Model {
 
         let results = match self {
             Self::Manga(model) => {
+                infer_text(model.clone(), targets, |model, image| {
+                    model.inference(image)
+                })
+                .await?
+            }
+            Self::MangaOnnx(model) => {
                 infer_text(model.clone(), targets, |model, image| {
                     model.inference(image)
                 })

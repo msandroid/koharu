@@ -23,6 +23,9 @@ Koharu introduces a local-first workflow for manga translation, utilizing the po
 > [!NOTE]
 > Koharu runs its vision models and LLMs **locally** on your machine to keep your data private and secure.
 
+> [!NOTE]
+> This fork is being specialized for iOS and Android. See [MOBILE.md](MOBILE.md) for the on-device ONNX pipeline and roadmap.
+
 ---
 
 ![screenshot](packages/docs/screenshot.png)

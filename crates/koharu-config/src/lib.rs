@@ -35,6 +35,7 @@ const CONFIG_DIRECTORY: &str = ".koharu";
 const CONFIG_FILE: &str = "config.toml";
 
 static MANAGER: OnceLock<Result<Arc<Manager>, String>> = OnceLock::new();
+static PATH: OnceLock<PathBuf> = OnceLock::new();
 
 /// Monotonically increasing version of a live configuration value.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -370,8 +371,44 @@ impl Manager {
     }
 }
 
-/// Returns the shared Koharu configuration path: `~/.koharu/config.toml`.
+/// Places the configuration file before any section is loaded.
+///
+/// Sandboxed mobile apps have no usable home directory, so they keep the file
+/// in their own data directory.
+pub fn configure(path: impl Into<PathBuf>) -> Result<()> {
+    let requested = path.into();
+    anyhow::ensure!(
+        requested.is_absolute(),
+        "configuration path must be absolute: {}",
+        requested.display()
+    );
+    anyhow::ensure!(
+        MANAGER.get().is_none(),
+        "configuration is already loaded from {}",
+        PATH.get().map_or_else(
+            || "the default path".to_owned(),
+            |path| path.display().to_string()
+        )
+    );
+    if let Err(requested) = PATH.set(requested) {
+        let active = PATH
+            .get()
+            .context("configuration path was set without a value")?;
+        anyhow::ensure!(
+            active == &requested,
+            "configuration path is already {}",
+            active.display()
+        );
+    }
+    Ok(())
+}
+
+/// Returns the shared Koharu configuration path: the configured path, or
+/// `~/.koharu/config.toml` by default.
 pub fn path() -> Result<PathBuf> {
+    if let Some(path) = PATH.get() {
+        return Ok(path.clone());
+    }
     let home = dirs::home_dir().context("could not determine the home directory")?;
     Ok(home.join(CONFIG_DIRECTORY).join(CONFIG_FILE))
 }

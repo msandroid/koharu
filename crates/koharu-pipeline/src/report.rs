@@ -32,3 +32,13 @@ pub struct StageOutput {
 pub trait Committer: Send {
     async fn commit(&mut self, output: StageOutput) -> Result<koharu_scene::Snapshot>;
 }
+
+/// Commits stage output straight into an in-memory or file-backed session.
+#[async_trait]
+impl Committer for koharu_scene::Session {
+    async fn commit(&mut self, output: StageOutput) -> Result<koharu_scene::Snapshot> {
+        Ok(koharu_scene::Session::commit(self, output.patch)
+            .await?
+            .snapshot)
+    }
+}

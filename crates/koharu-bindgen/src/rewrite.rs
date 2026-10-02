@@ -93,7 +93,7 @@ fn loader_tokens(library_names: &[String]) -> TokenStream {
         fn __koharu_bindgen_library_file_name(library_name: &str) -> ::std::string::String {
             if cfg!(target_os = "windows") {
                 ::std::format!("{library_name}.dll")
-            } else if cfg!(target_os = "macos") {
+            } else if cfg!(any(target_os = "macos", target_os = "ios")) {
                 ::std::format!("lib{library_name}.dylib")
             } else {
                 ::std::format!("lib{library_name}.so")
@@ -101,6 +101,7 @@ fn loader_tokens(library_names: &[String]) -> TokenStream {
         }
 
         fn __koharu_bindgen_bundled_library_paths(
+            library_name: &str,
             library_file_name: &str,
         ) -> ::std::vec::Vec<::std::path::PathBuf> {
             // A bundled app's working directory is not necessarily its executable directory.
@@ -116,6 +117,20 @@ fn loader_tokens(library_names: &[String]) -> TokenStream {
             if let Some(contents) = directory.parent() {
                 paths.push(contents.join("Frameworks").join(library_file_name));
             }
+            // iOS app bundles are flat; the App Store only accepts dynamic code
+            // embedded as frameworks under `Frameworks/`.
+            #[cfg(target_os = "ios")]
+            {
+                let frameworks = directory.join("Frameworks");
+                paths.push(
+                    frameworks
+                        .join(::std::format!("{library_name}.framework"))
+                        .join(library_name),
+                );
+                paths.push(frameworks.join(library_file_name));
+            }
+            #[cfg(not(target_os = "ios"))]
+            let _ = library_name;
             paths.push(directory.join(library_file_name));
             paths
         }
@@ -129,7 +144,7 @@ fn loader_tokens(library_names: &[String]) -> TokenStream {
                 .map(::std::convert::Into::into)
         }
 
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "android"))]
         fn __koharu_bindgen_already_loaded_library(
             library_file_name: &str,
         ) -> ::std::option::Option<::libloading::Library> {
@@ -143,7 +158,7 @@ fn loader_tokens(library_names: &[String]) -> TokenStream {
             .map(::std::convert::Into::into)
         }
 
-        #[cfg(not(any(target_os = "windows", target_os = "linux")))]
+        #[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "android")))]
         fn __koharu_bindgen_already_loaded_library(
             _library_file_name: &str,
         ) -> ::std::option::Option<::libloading::Library> {
@@ -151,6 +166,7 @@ fn loader_tokens(library_names: &[String]) -> TokenStream {
         }
 
         unsafe fn __koharu_bindgen_open_library(
+            library_name: &str,
             library_file_name: &str,
         ) -> ::std::result::Result<::libloading::Library, ::std::string::String> {
             // Reuse a library brought into the process by another dependency first.
@@ -158,7 +174,7 @@ fn loader_tokens(library_names: &[String]) -> TokenStream {
                 return Ok(library);
             }
 
-            for path in __koharu_bindgen_bundled_library_paths(library_file_name) {
+            for path in __koharu_bindgen_bundled_library_paths(library_name, library_file_name) {
                 if let Ok(library) = unsafe { ::libloading::Library::new(path) } {
                     return Ok(library);
                 }
@@ -174,7 +190,7 @@ fn loader_tokens(library_names: &[String]) -> TokenStream {
 
                 for library_name in __KOHARU_BINDGEN_LIBRARY_NAMES {
                     let library_file_name = __koharu_bindgen_library_file_name(library_name);
-                    match unsafe { __koharu_bindgen_open_library(&library_file_name) } {
+                    match unsafe { __koharu_bindgen_open_library(library_name, &library_file_name) } {
                         Ok(library) => libraries.push(library),
                         Err(error) => errors.push(::std::format!("{library_file_name}: {error}")),
                     }
@@ -350,4 +366,32 @@ fn link_name(attr: &Attribute) -> Option<String> {
 
 fn is_link_attr(attr: &Attribute) -> bool {
     attr.path().is_ident("link_name") || attr.path().is_ident("link_ordinal")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn generated_loader_finds_mobile_bundles() {
+        let source = rewrite_bindings(
+            r#"unsafe extern "C" { pub fn llama_backend_init(); }"#,
+            "llama",
+        )
+        .unwrap();
+        let source = source.replace(char::is_whitespace, "");
+
+        assert!(
+            source.contains(r#"target_os="macos",target_os="ios""#),
+            "iOS uses dylib names"
+        );
+        assert!(
+            source.contains(r#"format!("{library_name}.framework")"#),
+            "iOS looks inside embedded frameworks"
+        );
+        assert!(
+            source.contains(r#"target_os="linux",target_os="android""#),
+            "Android reuses libraries the app already loaded"
+        );
+    }
 }

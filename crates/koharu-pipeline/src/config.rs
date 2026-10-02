@@ -58,24 +58,28 @@ impl Serialize for PipelineConfig {
     {
         let detection = match &self.detection {
             DetectionModel::KoharuLayoutRFDetrSeg2XL(_) => "koharu-layout-rfdetr-seg-2xl",
+            DetectionModel::ComicTextDetectorOnnx {} => "comic-text-detector-onnx",
         };
         let ocr = match &self.ocr {
             OcrModel::PaddleOcrVl1_6 => "paddleocr-vl-1.6",
             OcrModel::MangaOcr => "manga-ocr",
+            OcrModel::MangaOcrOnnx => "manga-ocr-onnx",
             OcrModel::BaberuOcr => "baberu-ocr",
             OcrModel::HayaiOcr => "hayai-ocr",
         };
         let inpainting = match &self.inpainting {
             InpaintingModel::LaMa {} => "lama",
+            InpaintingModel::LaMaOnnx {} => "lama-onnx",
             InpaintingModel::AotInpainting {} => "aot-inpainting",
             InpaintingModel::Flux2Klein(_) => "flux2-klein",
             InpaintingModel::RoremMixed(_) => "rorem-mixed",
         };
         let mut processor = self.processor.clone();
-        let DetectionModel::KoharuLayoutRFDetrSeg2XL(config) = &self.detection;
-        processor
-            .koharu_layout_rfdetr_seg_2xl
-            .get_or_insert_with(|| config.clone());
+        if let DetectionModel::KoharuLayoutRFDetrSeg2XL(config) = &self.detection {
+            processor
+                .koharu_layout_rfdetr_seg_2xl
+                .get_or_insert_with(|| config.clone());
+        }
         match &self.inpainting {
             InpaintingModel::Flux2Klein(config) => {
                 processor.flux2_klein.get_or_insert_with(|| config.clone());
@@ -83,7 +87,9 @@ impl Serialize for PipelineConfig {
             InpaintingModel::RoremMixed(config) => {
                 processor.rorem_mixed.get_or_insert_with(|| config.clone());
             }
-            InpaintingModel::LaMa {} | InpaintingModel::AotInpainting {} => {}
+            InpaintingModel::LaMa {}
+            | InpaintingModel::LaMaOnnx {}
+            | InpaintingModel::AotInpainting {} => {}
         }
         PipelineFile {
             detection: ModelSelection {
@@ -115,6 +121,7 @@ impl<'de> Deserialize<'de> for PipelineConfig {
                     .clone()
                     .unwrap_or_default(),
             ),
+            "comic-text-detector-onnx" => DetectionModel::ComicTextDetectorOnnx {},
             model => {
                 return Err(serde::de::Error::custom(format!(
                     "unsupported detection model {model}"
@@ -124,6 +131,7 @@ impl<'de> Deserialize<'de> for PipelineConfig {
         let ocr = match file.ocr.model.as_str() {
             "paddleocr-vl-1.6" => OcrModel::PaddleOcrVl1_6,
             "manga-ocr" => OcrModel::MangaOcr,
+            "manga-ocr-onnx" => OcrModel::MangaOcrOnnx,
             "baberu-ocr" => OcrModel::BaberuOcr,
             "hayai-ocr" => OcrModel::HayaiOcr,
             model => {
@@ -134,6 +142,7 @@ impl<'de> Deserialize<'de> for PipelineConfig {
         };
         let inpainting = match file.inpainting.model.as_str() {
             "lama" => InpaintingModel::LaMa {},
+            "lama-onnx" => InpaintingModel::LaMaOnnx {},
             "aot-inpainting" => InpaintingModel::AotInpainting {},
             "flux2-klein" => {
                 InpaintingModel::Flux2Klein(file.processor.flux2_klein.clone().unwrap_or_default())
@@ -206,12 +215,16 @@ impl PipelineConfig {
                         .unwrap_or_else(|| config.clone()),
                 ))
             }
+            DetectionModel::ComicTextDetectorOnnx {} => {
+                Ok(DetectionModel::ComicTextDetectorOnnx {})
+            }
         }
     }
 
     pub fn inpainting(&self) -> Result<InpaintingModel> {
         match &self.inpainting {
             InpaintingModel::LaMa {} => Ok(InpaintingModel::LaMa {}),
+            InpaintingModel::LaMaOnnx {} => Ok(InpaintingModel::LaMaOnnx {}),
             InpaintingModel::AotInpainting {} => Ok(InpaintingModel::AotInpainting {}),
             InpaintingModel::Flux2Klein(config) => Ok(InpaintingModel::Flux2Klein(
                 self.processor
@@ -235,6 +248,7 @@ impl PipelineConfig {
             self.ocr,
             OcrModel::PaddleOcrVl1_6
                 | OcrModel::MangaOcr
+                | OcrModel::MangaOcrOnnx
                 | OcrModel::BaberuOcr
                 | OcrModel::HayaiOcr
         ) {
@@ -260,6 +274,9 @@ pub struct ProcessorConfig {
 pub enum DetectionModel {
     #[serde(rename = "koharu-layout-rfdetr-seg-2xl")]
     KoharuLayoutRFDetrSeg2XL(KoharuLayoutRFDetrSeg2XLConfig),
+    /// Comic text detector on ONNX Runtime, the detector of mobile builds.
+    #[serde(rename = "comic-text-detector-onnx")]
+    ComicTextDetectorOnnx {},
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Type)]
@@ -269,6 +286,9 @@ pub enum OcrModel {
     PaddleOcrVl1_6,
     #[serde(rename = "manga-ocr")]
     MangaOcr,
+    /// Manga OCR on ONNX Runtime, the recognizer of mobile builds.
+    #[serde(rename = "manga-ocr-onnx")]
+    MangaOcrOnnx,
     #[serde(rename = "baberu-ocr")]
     BaberuOcr,
     #[serde(rename = "hayai-ocr")]
@@ -280,6 +300,9 @@ pub enum OcrModel {
 pub enum InpaintingModel {
     #[serde(rename = "lama")]
     LaMa {},
+    /// LaMa on ONNX Runtime, the inpainter of mobile builds.
+    #[serde(rename = "lama-onnx")]
+    LaMaOnnx {},
     #[serde(rename = "aot-inpainting")]
     AotInpainting {},
     #[serde(rename = "flux2-klein")]
@@ -335,6 +358,36 @@ mod tests {
                 if config.prompt == "Remove the lettering."
                     && config.negative_prompt == "letters, words"
         ));
+    }
+
+    #[test]
+    fn onnx_models_round_trip_through_the_pipeline_file() {
+        let config: PipelineConfig = toml::from_str(
+            r#"
+                [detection]
+                model = "comic-text-detector-onnx"
+
+                [ocr]
+                model = "manga-ocr-onnx"
+
+                [inpainting]
+                model = "lama-onnx"
+            "#,
+        )
+        .unwrap();
+
+        assert!(matches!(
+            config.detection(),
+            Ok(DetectionModel::ComicTextDetectorOnnx {})
+        ));
+        assert!(matches!(config.ocr, OcrModel::MangaOcrOnnx));
+        assert!(matches!(
+            config.inpainting(),
+            Ok(InpaintingModel::LaMaOnnx {})
+        ));
+        config.validate().unwrap();
+        let reloaded: PipelineConfig = toml::from_str(&toml::to_string(&config).unwrap()).unwrap();
+        assert_eq!(reloaded, config);
     }
 
     #[test]

@@ -1,6 +1,6 @@
-mod config;
-mod model;
-mod processor;
+pub(crate) mod config;
+pub(crate) mod model;
+pub(crate) mod processor;
 
 use anyhow::{Context, Result, ensure};
 use image::DynamicImage;

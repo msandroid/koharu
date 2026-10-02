@@ -1,0 +1,8 @@
+{
+  "$schema": "../gen/schemas/mobile-schema.json",
+  "identifier": "default",
+  "description": "Capabilities of the Koharu mobile UI.",
+  "windows": ["main"],
+  "platforms": ["iOS", "android", "linux", "macOS", "windows"],
+  "permissions": ["core:default"]
+}

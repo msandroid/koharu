@@ -153,7 +153,9 @@ export type DeepSeekConfig = Record<string, never>;
 
 export type DetectionModel = {
 	model: "koharu-layout-rfdetr-seg-2xl",
-} & KoharuLayoutRFDetrSeg2XLConfig;
+} & KoharuLayoutRFDetrSeg2XLConfig | 
+/**  Comic text detector on ONNX Runtime, the detector of mobile builds. */
+{ model: "comic-text-detector-onnx" };
 
 export type DeviceResources = {
 	name: string,
@@ -258,7 +260,9 @@ export type GrokConfig = Record<string, never>;
 
 export type GroupRole = "text";
 
-export type InpaintingModel = { model: "lama" } | { model: "aot-inpainting" } | {
+export type InpaintingModel = { model: "lama" } | 
+/**  LaMa on ONNX Runtime, the inpainter of mobile builds. */
+{ model: "lama-onnx" } | { model: "aot-inpainting" } | {
 	model: "flux2-klein",
 } & Flux2KleinConfig | {
 	model: "rorem-mixed",
@@ -336,7 +340,9 @@ export type ModelSelection = {
 	reasoning?: boolean,
 };
 
-export type OcrModel = { model: "paddleocr-vl-1.6" } | { model: "manga-ocr" } | { model: "baberu-ocr" } | { model: "hayai-ocr" };
+export type OcrModel = { model: "paddleocr-vl-1.6" } | { model: "manga-ocr" } | 
+/**  Manga OCR on ONNX Runtime, the recognizer of mobile builds. */
+{ model: "manga-ocr-onnx" } | { model: "baberu-ocr" } | { model: "hayai-ocr" };
 
 export type OpenAiCompatibleConfig = {
 	base_url?: string | null,

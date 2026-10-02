@@ -197,17 +197,17 @@ struct GenerationConfig {
 }
 
 #[derive(Debug)]
-struct BeamHypotheses {
+pub(crate) struct BeamHypotheses {
     num_beams: usize,
     length_penalty: f64,
     early_stopping: bool,
     beams: Vec<(f64, Vec<i64>)>,
     worst_score: f64,
-    done: bool,
+    pub(crate) done: bool,
 }
 
 impl BeamHypotheses {
-    fn new(num_beams: usize, length_penalty: f64, early_stopping: bool) -> Self {
+    pub(crate) fn new(num_beams: usize, length_penalty: f64, early_stopping: bool) -> Self {
         Self {
             num_beams,
             length_penalty,
@@ -218,7 +218,7 @@ impl BeamHypotheses {
         }
     }
 
-    fn add(&mut self, tokens: Vec<i64>, sum_logprobs: f64) {
+    pub(crate) fn add(&mut self, tokens: Vec<i64>, sum_logprobs: f64) {
         let score = sum_logprobs / (tokens.len() as f64).powf(self.length_penalty);
         if self.beams.len() < self.num_beams || score > self.worst_score {
             self.beams.push((score, tokens));
@@ -240,7 +240,7 @@ impl BeamHypotheses {
         }
     }
 
-    fn is_done(&mut self, best_sum_logprobs: f64, current_length: usize) -> bool {
+    pub(crate) fn is_done(&mut self, best_sum_logprobs: f64, current_length: usize) -> bool {
         self.done = if self.beams.len() < self.num_beams {
             false
         } else if self.early_stopping {
@@ -252,7 +252,7 @@ impl BeamHypotheses {
         self.done
     }
 
-    fn best(mut self) -> Result<Vec<i64>> {
+    pub(crate) fn best(mut self) -> Result<Vec<i64>> {
         self.beams.sort_by(|left, right| left.0.total_cmp(&right.0));
         self.beams
             .pop()
@@ -285,7 +285,7 @@ fn no_repeat_ngram_mask(
         .to_kind(Kind::Bool)
 }
 
-fn banned_ngram_tokens(sequence: &[i64], ngram_size: usize) -> Vec<i64> {
+pub(crate) fn banned_ngram_tokens(sequence: &[i64], ngram_size: usize) -> Vec<i64> {
     if ngram_size == 0 || sequence.len() + 1 < ngram_size {
         return Vec::new();
     }

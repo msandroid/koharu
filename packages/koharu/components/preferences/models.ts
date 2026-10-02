@@ -11,18 +11,21 @@ export type ModelStage = Exclude<Stage, 'translation'>
 export type ModelName = PipelineModel['model']
 
 export const modelOptions = {
-  detection: ['koharu-layout-rfdetr-seg-2xl'],
-  ocr: ['paddleocr-vl-1.6', 'manga-ocr', 'baberu-ocr', 'hayai-ocr'],
-  inpainting: ['lama', 'aot-inpainting', 'flux2-klein', 'rorem-mixed'],
+  detection: ['koharu-layout-rfdetr-seg-2xl', 'comic-text-detector-onnx'],
+  ocr: ['paddleocr-vl-1.6', 'manga-ocr', 'manga-ocr-onnx', 'baberu-ocr', 'hayai-ocr'],
+  inpainting: ['lama', 'lama-onnx', 'aot-inpainting', 'flux2-klein', 'rorem-mixed'],
 } satisfies Record<ModelStage, ModelName[]>
 
 export const modelNames: Record<ModelName, string> = {
   'koharu-layout-rfdetr-seg-2xl': 'Koharu Layout RF-DETR Seg 2XL',
+  'comic-text-detector-onnx': 'Comic Text Detector (ONNX)',
   'paddleocr-vl-1.6': 'PaddleOCR-VL 1.6',
   'manga-ocr': 'Manga OCR',
+  'manga-ocr-onnx': 'Manga OCR (ONNX)',
   'baberu-ocr': 'Baberu OCR',
   'hayai-ocr': 'Hayai OCR',
   lama: 'LaMa',
+  'lama-onnx': 'LaMa (ONNX)',
   'aot-inpainting': 'AOT Inpainting',
   'flux2-klein': 'FLUX.2 Klein',
   'rorem-mixed': 'RORem Mixed',
@@ -32,11 +35,14 @@ export function defaultModel(model: ModelName): PipelineModel {
   switch (model) {
     case 'koharu-layout-rfdetr-seg-2xl':
       return { model, text_threshold: null, bubble_threshold: null, panel_threshold: null }
+    case 'comic-text-detector-onnx':
     case 'paddleocr-vl-1.6':
     case 'manga-ocr':
+    case 'manga-ocr-onnx':
     case 'baberu-ocr':
     case 'hayai-ocr':
     case 'lama':
+    case 'lama-onnx':
     case 'aot-inpainting':
       return { model }
     case 'flux2-klein':

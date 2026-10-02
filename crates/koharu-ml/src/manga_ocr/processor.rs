@@ -10,7 +10,7 @@ use std::{collections::HashSet, fs, path::Path};
 use anyhow::{Result, bail};
 use fast_image_resize::{FilterType, ResizeAlg, ResizeOptions, Resizer};
 use image::{DynamicImage, RgbImage};
-use koharu_torch::{Device, Kind, Tensor};
+use koharu_torch::{Device, Tensor};
 use serde::Deserialize;
 
 #[derive(Debug, Clone, Deserialize)]
@@ -29,6 +29,14 @@ impl ViTImageProcessor {
     }
 
     pub(crate) fn preprocess(&self, image: &DynamicImage, device: Device) -> Result<Tensor> {
+        let ([width, height], values) = self.preprocess_host(image)?;
+        Ok(Tensor::from_slice(&values)
+            .view([1, 3, i64::from(height), i64::from(width)])
+            .to_device(device))
+    }
+
+    /// Returns normalized CHW pixel values on the host with their `[width, height]`.
+    pub(crate) fn preprocess_host(&self, image: &DynamicImage) -> Result<([u32; 2], Vec<f32>)> {
         if image.width() == 0 || image.height() == 0 {
             bail!("cannot recognize an empty image");
         }
@@ -47,24 +55,22 @@ impl ViTImageProcessor {
         } else {
             image
         };
-        let height = image.height() as i64;
-        let width = image.width() as i64;
-        let mut pixel_values = Tensor::from_slice(image.as_raw())
-            .view([1, height, width, 3])
-            .permute([0, 3, 1, 2])
-            .to_device(device)
-            .to_kind(Kind::Float)
-            / 255.0;
-        if self.do_normalize {
-            let mean = Tensor::from_slice(&self.image_mean)
-                .view([1, 3, 1, 1])
-                .to_device(device);
-            let std = Tensor::from_slice(&self.image_std)
-                .view([1, 3, 1, 1])
-                .to_device(device);
-            pixel_values = (pixel_values - mean) / std;
+        Ok(([image.width(), image.height()], self.normalize(&image)))
+    }
+
+    fn normalize(&self, image: &RgbImage) -> Vec<f32> {
+        let plane = image.width() as usize * image.height() as usize;
+        let mut values = vec![0.0f32; 3 * plane];
+        for (index, pixel) in image.pixels().enumerate() {
+            for channel in 0..3 {
+                let mut value = f32::from(pixel[channel]) / 255.0;
+                if self.do_normalize {
+                    value = (value - self.image_mean[channel]) / self.image_std[channel];
+                }
+                values[channel * plane + index] = value;
+            }
         }
-        Ok(pixel_values)
+        values
     }
 }
 
