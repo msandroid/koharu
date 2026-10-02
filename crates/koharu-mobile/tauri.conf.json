@@ -1,0 +1,42 @@
+{
+  "$schema": "https://raw.githubusercontent.com/tauri-apps/tauri/a8703ee487c659efbebb27c799752d523a6d09a1/crates/tauri-schema-generator/schemas/config.schema.json",
+  "productName": "Koharu",
+  "identifier": "rs.koharu.mobile",
+  "build": {
+    "devUrl": "http://localhost:5173",
+    "frontendDist": "../../packages/mobile/dist",
+    "beforeDevCommand": "bun run --filter @koharu/mobile dev",
+    "beforeBuildCommand": "bun run --filter @koharu/mobile build"
+  },
+  "app": {
+    "security": {
+      "csp": "default-src 'self'; img-src 'self' blob: data:; style-src 'self' 'unsafe-inline'; connect-src ipc: http://ipc.localhost"
+    },
+    "windows": [
+      {
+        "label": "main",
+        "title": "Koharu",
+        "width": 420,
+        "height": 860
+      }
+    ]
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": [
+      "../koharu/icons/32x32.png",
+      "../koharu/icons/128x128.png",
+      "../koharu/icons/128x128@2x.png",
+      "../koharu/icons/icon.icns",
+      "../koharu/icons/icon.ico"
+    ],
+    "license": "MIT OR Apache-2.0",
+    "iOS": {
+      "minimumSystemVersion": "16.0"
+    },
+    "android": {
+      "minSdkVersion": 28
+    }
+  }
+}

@@ -74,6 +74,10 @@ pub(crate) enum Llama {
         )
     )]
     MacosMetal,
+    /// llama.cpp shipped inside a mobile app package. Apps cannot download
+    /// native code, so the generated bindings load it from the bundle by name.
+    #[strum(serialize = "bundled")]
+    Bundled,
 }
 
 impl Llama {
@@ -96,6 +100,10 @@ impl sealed::Sealed for Llama {}
 
 impl Package for Llama {
     async fn install(self) -> Result<PathBuf> {
+        anyhow::ensure!(
+            self != Self::Bundled,
+            "bundled llama.cpp ships with the app and is not installed"
+        );
         let target = Store::root()
             .join("llama")
             .join(RELEASE)
@@ -123,7 +131,9 @@ impl Package for Llama {
 
 impl DiscoverablePackage for Llama {
     fn discover(hardware: &Hardware) -> Option<Self> {
-        if cfg!(all(target_os = "windows", target_arch = "x86_64")) {
+        if cfg!(any(target_os = "android", target_os = "ios")) {
+            Some(Self::Bundled)
+        } else if cfg!(all(target_os = "windows", target_arch = "x86_64")) {
             if hardware.supports_cuda() {
                 return Some(Self::WindowsCuda);
             }
@@ -162,11 +172,16 @@ impl RuntimePackage for Llama {
                 Component::Cuda(Cuda::Blas13),
             ]),
             Self::WindowsHip | Self::LinuxHip => Ok(vec![Component::Rocm(hardware.rocm_target()?)]),
-            Self::WindowsVulkan | Self::LinuxVulkan | Self::MacosMetal => Ok(Vec::new()),
+            Self::WindowsVulkan | Self::LinuxVulkan | Self::MacosMetal | Self::Bundled => {
+                Ok(Vec::new())
+            }
         }
     }
 
     async fn activate(self) -> Result<()> {
+        if self == Self::Bundled {
+            return Ok(());
+        }
         let root = self.install().await?;
         for library in self.libraries() {
             loader::load(root.join(library), false)

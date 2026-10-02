@@ -58,14 +58,29 @@ impl SerializableSecret for SecretValue {}
 
 const SERVICE: &str = "koharu";
 
+/// Platforms whose credential store is registered with `keyring_core` here
+/// rather than chosen by `keyring`'s defaults.
+const EXPLICIT_STORE: bool = cfg!(any(
+    target_os = "linux",
+    target_os = "android",
+    target_os = "ios"
+));
+
 static CREDENTIAL_STORE: LazyLock<Result<(), String>> = LazyLock::new(|| {
     #[cfg(target_os = "linux")]
-    {
-        linux_keyutils_keyring_store::Store::new()
-            .map(|store| keyring_core::set_default_store(store))
-            .map_err(|error| error.to_string())
-    }
-    #[cfg(not(target_os = "linux"))]
+    let store = linux_keyutils_keyring_store::Store::new();
+    // The data protection keychain is the only keychain on iOS.
+    #[cfg(target_os = "ios")]
+    let store = apple_native_keyring_store::protected::Store::new();
+    // Requires the `ndk-context` application context, which Tauri's Android
+    // runtime initializes before app code runs.
+    #[cfg(target_os = "android")]
+    let store = android_native_keyring_store::Store::new();
+    #[cfg(any(target_os = "linux", target_os = "android", target_os = "ios"))]
+    return store
+        .map(|store| keyring_core::set_default_store(store))
+        .map_err(|error| error.to_string());
+    #[cfg(not(any(target_os = "linux", target_os = "android", target_os = "ios")))]
     Ok(())
 });
 
@@ -96,11 +111,11 @@ pub fn delete(key: &str) -> anyhow::Result<()> {
 fn entry(key: &str) -> anyhow::Result<Entry> {
     match &*CREDENTIAL_STORE {
         Ok(()) => {}
-        Err(error) => anyhow::bail!("failed to initialize Linux Keyutils: {error}"),
+        Err(error) => anyhow::bail!("failed to initialize the credential store: {error}"),
     }
-    #[cfg(target_os = "linux")]
-    let entry = Entry::new(SERVICE, key)?;
-    #[cfg(not(target_os = "linux"))]
-    let entry = keyring::Entry::new(SERVICE, key)?.inner;
-    Ok(entry)
+    if EXPLICIT_STORE {
+        Ok(Entry::new(SERVICE, key)?)
+    } else {
+        Ok(keyring::Entry::new(SERVICE, key)?.inner)
+    }
 }

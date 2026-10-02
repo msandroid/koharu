@@ -17,6 +17,8 @@ crate::model_repository!("ogkalu/comic-text-and-bubble-detector" @ "16e8a622f91f
     WEIGHTS = "detector-v4-s_int8.onnx",
 });
 
+pub(super) const FILES: &[koharu_runtime::HuggingFaceFile<'static>] = &[WEIGHTS];
+
 const INPUT_SIZE: u32 = 640;
 const LABELS: [&str; 3] = ["bubble", "text_bubble", "text_free"];
 

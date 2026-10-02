@@ -1,5 +1,4 @@
 use std::{
-    collections::BTreeMap,
     fs,
     path::PathBuf,
     sync::Arc,
@@ -10,13 +9,13 @@ use anyhow::{Context as _, Result};
 use clap::{Parser, ValueEnum};
 use koharu_config::Config;
 use koharu_pipeline::{
-    Committer, DetectionModel, Flux2KleinConfig, InpaintingModel, KoharuLayoutRFDetrSeg2XLConfig,
-    OcrModel, Operation, Pipeline, PipelineConfig, Progress, Request, RoremMixedConfig, Scope,
-    StageOutput, TranslationConfig,
+    DetectionModel, Flux2KleinConfig, InpaintingModel, KoharuLayoutRFDetrSeg2XLConfig, OcrModel,
+    Operation, Pipeline, PipelineConfig, Progress, Request, RoremMixedConfig, Scope,
+    TranslationConfig, import_image, render_image,
 };
-use koharu_rasterizer::{RasterOptions, Rasterizer};
+use koharu_rasterizer::Rasterizer;
 use koharu_renderer::Renderer;
-use koharu_scene::{AssetInput, AssetMetadata, AssetRole, At, PageDraft, Session};
+use koharu_scene::Session;
 use koharu_translator::{GenerationConfig, Language, ModelSelection, Provider, ProvidersConfig};
 
 #[derive(Debug, Parser)]
@@ -48,15 +47,6 @@ struct Arguments {
 
     #[arg(long)]
     cpu: bool,
-}
-
-struct SessionCommitter<'a>(&'a mut Session);
-
-#[async_trait::async_trait]
-impl Committer for SessionCommitter<'_> {
-    async fn commit(&mut self, output: StageOutput) -> Result<koharu_scene::Snapshot> {
-        Ok(self.0.commit(output.patch).await?.snapshot)
-    }
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -141,48 +131,24 @@ impl Arguments {
     }
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
-    let arguments = Arguments::parse();
+fn main() -> Result<()> {
+    // SAFETY: no other thread exists yet.
+    unsafe { koharu_ml::onnx::disable_telemetry() };
+    tokio::runtime::Runtime::new()?.block_on(run(Arguments::parse()))
+}
+
+async fn run(arguments: Arguments) -> Result<()> {
     initialize_with_retry().await;
 
     let source = fs::read(&arguments.input)
         .with_context(|| format!("failed to read {}", arguments.input.display()))?;
-    let decoded = image::load_from_memory(&source).context("failed to decode input image")?;
     let name = arguments
         .input
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or("input");
     let mut session = Session::memory().await?;
-    let mut page = None;
-    let patch = session.snapshot().patch(|edit| {
-        let id = edit.add_page(
-            PageDraft::new(
-                name,
-                f64::from(decoded.width()),
-                f64::from(decoded.height()),
-            ),
-            At::End,
-        )?;
-        edit.set_asset(
-            id,
-            &AssetRole::new("source")?,
-            AssetInput::new(
-                Arc::<[u8]>::from(source),
-                image_media_type(&arguments.input),
-                AssetMetadata {
-                    width: Some(decoded.width()),
-                    height: Some(decoded.height()),
-                    attributes: BTreeMap::new(),
-                },
-            ),
-        )?;
-        page = Some(id);
-        Ok(())
-    })?;
-    session.commit(patch).await?;
-    let page = page.expect("page ID is assigned by the edit");
+    let page = import_image(&mut session, name, source).await?;
 
     let device = koharu_ml::device(arguments.cpu);
     let pipeline = Pipeline::from_config(
@@ -191,7 +157,6 @@ async fn main() -> Result<()> {
         device,
     )?;
     let snapshot = session.snapshot();
-    let mut committer = SessionCommitter(&mut session);
     let report = pipeline
         .execute(
             snapshot,
@@ -205,20 +170,17 @@ async fn main() -> Result<()> {
                 })),
                 ..Request::default()
             },
-            &mut committer,
+            &mut session,
         )
         .await?;
     eprintln!("pipeline finished in {:.2}s", report.elapsed.as_secs_f64());
 
     let renderer = Renderer::new()?;
-    let render_started = Instant::now();
-    let snapshot = session.snapshot();
-    let frame = renderer.render(&snapshot, page).await?;
     let rasterizer = Rasterizer::new()?;
-    let raster = rasterizer.rasterize(&frame.raster_frame()?, RasterOptions::default())?;
+    let render_started = Instant::now();
+    let image = render_image(&renderer, &rasterizer, &session.snapshot(), page).await?;
     let render_elapsed = render_started.elapsed();
-    raster
-        .image
+    image
         .save(&arguments.output)
         .with_context(|| format!("failed to write {}", arguments.output.display()))?;
     eprintln!(
@@ -247,19 +209,6 @@ async fn initialize_with_retry() {
                 delay = delay.saturating_mul(2).min(Duration::from_secs(30));
             }
         }
-    }
-}
-
-fn image_media_type(path: &std::path::Path) -> &'static str {
-    match path
-        .extension()
-        .and_then(|extension| extension.to_str())
-        .map(str::to_ascii_lowercase)
-        .as_deref()
-    {
-        Some("jpg" | "jpeg") => "image/jpeg",
-        Some("webp") => "image/webp",
-        _ => "image/png",
     }
 }
 

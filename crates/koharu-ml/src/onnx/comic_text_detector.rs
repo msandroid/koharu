@@ -25,6 +25,8 @@ crate::model_repository!("mayocream/comic-text-detector-onnx" @ "a5d67ec772adef8
     WEIGHTS = "comic-text-detector.onnx",
 });
 
+pub(super) const FILES: &[koharu_runtime::HuggingFaceFile<'static>] = &[WEIGHTS];
+
 /// The export was traced at 1024×1024; the Torch port letterboxes to 1280.
 const INPUT_SIZE: u32 = 1024;
 /// BallonsTranslator's block confidence and NMS defaults; upstream decodes the

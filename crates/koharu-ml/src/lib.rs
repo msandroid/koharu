@@ -37,6 +37,18 @@ static LLAMA: OnceCell<LlamaBackend> = OnceCell::const_new();
 static DIFFUSION: OnceCell<()> = OnceCell::const_new();
 static READY: OnceCell<Device> = OnceCell::const_new();
 
+/// Native runtimes this platform provides.
+///
+/// Mobile apps cannot download native code and run vision models through ONNX
+/// Runtime, so they only use the llama.cpp build bundled with the app.
+fn runtime_features() -> &'static [Feature] {
+    if cfg!(any(target_os = "android", target_os = "ios")) {
+        &[Feature::Llama]
+    } else {
+        &[Feature::Torch, Feature::Llama, Feature::Diffusion]
+    }
+}
+
 /// Initializes every process-wide native runtime used by Koharu.
 ///
 /// Concurrent callers share one attempt. A failed attempt may be retried; any
@@ -47,7 +59,7 @@ static READY: OnceCell<Device> = OnceCell::const_new();
 pub async fn init() -> anyhow::Result<()> {
     READY
         .get_or_try_init(|| async {
-            let runtime = Runtime::discover([Feature::Torch, Feature::Llama, Feature::Diffusion])?;
+            let runtime = Runtime::discover(runtime_features().iter().copied())?;
             let device = runtime
                 .initialize()
                 .await
@@ -59,13 +71,15 @@ pub async fn init() -> anyhow::Result<()> {
                     LlamaBackend::init().context("failed to initialize llama.cpp backend")
                 })
                 .await?;
-            DIFFUSION
-                .get_or_try_init(|| async {
-                    koharu_diffusion::send_logs_to_tracing()
-                        .context("failed to redirect stable-diffusion.cpp logs")?;
-                    Ok::<(), anyhow::Error>(())
-                })
-                .await?;
+            if runtime_features().contains(&Feature::Diffusion) {
+                DIFFUSION
+                    .get_or_try_init(|| async {
+                        koharu_diffusion::send_logs_to_tracing()
+                            .context("failed to redirect stable-diffusion.cpp logs")?;
+                        Ok::<(), anyhow::Error>(())
+                    })
+                    .await?;
+            }
             Ok::<Device, anyhow::Error>(device)
         })
         .await?;

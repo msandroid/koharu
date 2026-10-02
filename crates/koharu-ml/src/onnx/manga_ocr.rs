@@ -32,6 +32,9 @@ crate::model_repository!("onnx-community/manga-ocr-base-ONNX" @ "f9023406bb2f6b1
     DECODER = "onnx/decoder_model_int8.onnx",
 });
 
+pub(super) const FILES: &[koharu_runtime::HuggingFaceFile<'static>] =
+    &[CONFIG, PROCESSOR, VOCABULARY, ENCODER, DECODER];
+
 #[derive(Debug)]
 pub struct MangaOcrOnnx {
     encoder: Mutex<Session>,

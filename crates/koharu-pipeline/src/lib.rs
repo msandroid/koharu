@@ -6,6 +6,7 @@ mod error;
 mod execution;
 mod images;
 mod model_cell;
+mod page;
 mod pipeline;
 mod progress;
 mod report;
@@ -21,6 +22,7 @@ pub use config::{
     DetectionModel, InpaintingModel, OcrModel, PipelineConfig, ProcessorConfig, TranslationConfig,
 };
 pub use error::{ErrorKind, PipelineError};
+pub use page::{import_image, render_image};
 pub use pipeline::Pipeline;
 pub use progress::{Progress, ProgressSink};
 pub use report::{Committer, Report, RunStatus, StageOutput};

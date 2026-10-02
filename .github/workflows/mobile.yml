@@ -1,0 +1,115 @@
+name: Mobile
+
+on:
+  push:
+    branches: ['main']
+  pull_request:
+    paths:
+      - 'crates/**'
+      - 'packages/mobile/**'
+      - 'scripts/mobile/**'
+      - 'Cargo.lock'
+      - 'bun.lock'
+      - '.github/workflows/mobile.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  LLAMA_RELEASE: b11317
+  ORT_VERSION: 1.30.0
+  TAURI_CLI_REV: a8703ee487c659efbebb27c799752d523a6d09a1
+
+jobs:
+  android:
+    name: Android (arm64)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: oven-sh/setup-bun@v2
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@v3
+      - name: Install NDK
+        run: |
+          sdkmanager --install "ndk;27.2.12479018" "build-tools;35.0.0"
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/27.2.12479018" >> "$GITHUB_ENV"
+          echo "NDK_HOME=$ANDROID_HOME/ndk/27.2.12479018" >> "$GITHUB_ENV"
+      - run: sudo apt-get update && sudo apt-get install --no-install-recommends -y ninja-build
+      - run: rustup target add aarch64-linux-android
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: koharu-mobile-android
+          cache-bin: true
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Install Tauri CLI
+        run: cargo install tauri-cli --git https://github.com/tauri-apps/tauri --rev "$TAURI_CLI_REV" --locked
+      - run: bun install --frozen-lockfile --ignore-scripts
+      - name: Generate the Android project
+        working-directory: crates/koharu-mobile
+        run: cargo tauri android init --ci
+      - name: Build native libraries
+        run: scripts/mobile/android-native.sh crates/koharu-mobile/gen/android/app/src/main/jniLibs/arm64-v8a
+      - name: Build the app
+        working-directory: crates/koharu-mobile
+        env:
+          # bindgen parses the llama.cpp headers for the device, not the host.
+          BINDGEN_EXTRA_CLANG_ARGS_aarch64_linux_android: --sysroot=${{ env.ANDROID_NDK_HOME }}/toolchains/llvm/prebuilt/linux-x86_64/sysroot
+        run: cargo tauri android build --ci --apk --target aarch64
+      - name: Sign with a throwaway key
+        run: |
+          apk=$(find crates/koharu-mobile/gen/android/app/build/outputs/apk -name '*-unsigned.apk' | head -1)
+          keytool -genkeypair -keystore ci.jks -storepass android -keypass android -alias ci \
+            -keyalg RSA -keysize 2048 -validity 30 -dname "CN=Koharu CI"
+          "$ANDROID_HOME/build-tools/35.0.0/zipalign" -f 4 "$apk" aligned.apk
+          "$ANDROID_HOME/build-tools/35.0.0/apksigner" sign --ks ci.jks --ks-pass pass:android \
+            --out koharu-mobile-arm64.apk aligned.apk
+      - uses: actions/upload-artifact@v7
+        with:
+          name: koharu-mobile-android
+          path: koharu-mobile-arm64.apk
+          retention-days: 7
+
+  ios:
+    name: iOS (arm64, unsigned)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: oven-sh/setup-bun@v2
+      - run: brew install ninja xcodegen
+      - run: rustup target add aarch64-apple-ios
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: koharu-mobile-ios
+          cache-bin: true
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Install Tauri CLI
+        run: cargo install tauri-cli --git https://github.com/tauri-apps/tauri --rev "$TAURI_CLI_REV" --locked
+      - run: bun install --frozen-lockfile --ignore-scripts
+      - name: Build native frameworks
+        run: scripts/mobile/ios-native.sh crates/koharu-mobile/native/ios
+      - name: Generate the Xcode project
+        working-directory: crates/koharu-mobile
+        run: cargo tauri ios init --ci
+      - name: Build the app
+        working-directory: crates/koharu-mobile/gen/apple
+        run: |
+          export BINDGEN_EXTRA_CLANG_ARGS_aarch64_apple_ios="--sysroot=$(xcrun --sdk iphoneos --show-sdk-path)"
+          project=$(ls -d *.xcodeproj | head -1)
+          scheme=$(xcodebuild -list -json -project "$project" | python3 -c 'import json,sys; print(next(s for s in json.load(sys.stdin)["project"]["schemes"] if s.endswith("_iOS")))')
+          xcodebuild -project "$project" -scheme "$scheme" -sdk iphoneos -configuration release \
+            -arch arm64 -derivedDataPath build CODE_SIGNING_ALLOWED=NO build
+          app=$(find build/Build/Products -name '*.app' -maxdepth 2 | head -1)
+          test -f "$app/Frameworks/llama.framework/llama"
+          test -f "$app/Frameworks/onnxruntime.framework/onnxruntime"
+          mkdir -p "$GITHUB_WORKSPACE/out/Payload" && cp -R "$app" "$GITHUB_WORKSPACE/out/Payload/"
+          (cd "$GITHUB_WORKSPACE/out" && zip -qry koharu-mobile-unsigned.ipa Payload)
+      - uses: actions/upload-artifact@v7
+        with:
+          name: koharu-mobile-ios
+          path: out/koharu-mobile-unsigned.ipa
+          retention-days: 7

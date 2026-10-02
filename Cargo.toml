@@ -131,6 +131,7 @@ tauri = { git = "https://github.com/tauri-apps/tauri", rev = "a8703ee487c659efbe
 ] }
 tauri-build = { git = "https://github.com/tauri-apps/tauri", rev = "a8703ee487c659efbebb27c799752d523a6d09a1" }
 tauri-runtime-cef = { git = "https://github.com/tauri-apps/tauri", rev = "a8703ee487c659efbebb27c799752d523a6d09a1" }
+tauri-runtime-wry = { git = "https://github.com/tauri-apps/tauri", rev = "a8703ee487c659efbebb27c799752d523a6d09a1" }
 tauri-plugin-log = { git = "https://github.com/tauri-apps/plugins-workspace", rev = "d9be6d0492fb6746637ba64497237b2116aaec90" }
 tauri-plugin-opener = { git = "https://github.com/tauri-apps/plugins-workspace", rev = "d9be6d0492fb6746637ba64497237b2116aaec90" }
 tauri-plugin-process = { git = "https://github.com/tauri-apps/plugins-workspace", rev = "d9be6d0492fb6746637ba64497237b2116aaec90" }
@@ -150,6 +151,8 @@ unicode-bidi = "0.3.18"
 criterion = { version = "0.8.2", features = ["html_reports"] }
 keyring = { version = "4.2.0", features = ["linux-keyutils-keyring-store"] }
 keyring-core = "1.0.0"
+apple-native-keyring-store = { version = "1.0.2", features = ["protected"] }
+android-native-keyring-store = "1.0.0"
 linux-keyutils-keyring-store = "1.0.0"
 llguidance = "1.9.1"
 sentry = { version = "0.49.3", features = ["tracing"] }

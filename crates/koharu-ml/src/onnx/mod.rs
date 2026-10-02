@@ -33,19 +33,61 @@ pub use self::{
 
 static LIBRARY: OnceLock<Option<PathBuf>> = OnceLock::new();
 
-/// Selects the ONNX Runtime shared library used by every later session.
+/// Every artifact the ONNX models resolve, so apps can download them up front.
+#[must_use]
+pub fn files() -> Vec<koharu_runtime::HuggingFaceFile<'static>> {
+    [
+        comic_text_detector::FILES,
+        comic_bubble_detector::FILES,
+        manga_ocr::FILES,
+        lama::FILES,
+    ]
+    .concat()
+}
+
+/// Turns off ONNX Runtime's telemetry for this process.
+///
+/// Builds since 1.2x report usage from POSIX platforms, including Android and
+/// iOS, unless `ORT_DISABLE_TELEMETRY` is set before the runtime starts; the
+/// environment's telemetry switch does not cover that path. Translation runs
+/// on the device so that pages and usage stay there.
+///
+/// # Safety
+///
+/// Call before any other thread exists, as with [`std::env::set_var`].
+pub unsafe fn disable_telemetry() {
+    // SAFETY: the caller guarantees that no other thread reads the environment.
+    unsafe { std::env::set_var("ORT_DISABLE_TELEMETRY", "1") };
+}
+
+/// Selects the ONNX Runtime shared library and configures the process-wide
+/// environment used by every later session.
 ///
 /// `None` keeps ONNX Runtime's own lookup: `ORT_DYLIB_PATH`, then the platform
 /// library name on the loader path. Only the first call has an effect.
+/// The environment's telemetry switch is turned off as well; see
+/// [`disable_telemetry`] for the part it does not cover.
 pub fn init(library: Option<&Path>) -> Result<()> {
     let library = LIBRARY.get_or_init(|| library.map(Path::to_path_buf));
-    if let Some(path) = library {
-        ort::init_from(path)
-            .with_context(|| format!("failed to load ONNX Runtime from {}", path.display()))?
-            .with_name("koharu")
-            .commit();
-    }
+    // Load the library now: ONNX Runtime's lazy lookup panics on first use
+    // instead of returning an error the app could show.
+    let path = library.clone().unwrap_or_else(default_library);
+    ort::init_from(&path)
+        .with_context(|| format!("failed to load ONNX Runtime from {}", path.display()))?
+        .with_name("koharu")
+        .with_telemetry(false)
+        .commit();
     Ok(())
+}
+
+/// ONNX Runtime's own lookup when no library is given.
+fn default_library() -> PathBuf {
+    match std::env::var_os("ORT_DYLIB_PATH") {
+        Some(path) if !path.is_empty() => path.into(),
+        _ if cfg!(target_os = "windows") => "onnxruntime.dll".into(),
+        _ if cfg!(any(target_os = "macos", target_os = "ios")) => "libonnxruntime.dylib".into(),
+        _ => "libonnxruntime.so".into(),
+    }
 }
 
 /// Execution providers in preference order for the current platform.

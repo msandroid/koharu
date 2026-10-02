@@ -26,6 +26,8 @@ crate::model_repository!("Liiesl/lama-manga-onnx-quant" @ "51d07e18caf9b1258585d
     WEIGHTS = "lama-manga_fp16.onnx",
 });
 
+pub(super) const FILES: &[koharu_runtime::HuggingFaceFile<'static>] = &[WEIGHTS];
+
 const INPUT_SIZE: u32 = 512;
 
 #[derive(Debug)]
