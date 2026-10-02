@@ -136,9 +136,14 @@ uploads an arm64 APK signed with a throwaway key and an unsigned iOS app (zip as
 
 Open items:
 
-- The Android and iOS builds have only been written, not run: this environment
-  cannot reach `dl.google.com` (Android SDK/NDK) or run Xcode. Run the Mobile
-  workflow on GitHub Actions to verify them.
+- Android was built end to end with the same steps as CI (NDK 27, release,
+  arm64): the signed APK is 94 MB and holds the app library plus llama.cpp and
+  ONNX Runtime. It has not been run on a phone yet; there is no emulator here
+  (no KVM). The first real build found two problems, both fixed: the generated
+  loaders needed `libc` on Android, and the release APK kept about 90 MB of
+  debug symbols.
+- iOS has not been built: Xcode only runs on macOS. Run the Mobile workflow on
+  GitHub Actions to verify it.
 - The `koharu-ml` crate still compiles the Torch bindings on mobile (they are
   loaded dynamically and never used there); splitting the llama.cpp and `llm`
   modules out would shorten mobile builds.

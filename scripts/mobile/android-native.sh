@@ -37,6 +37,11 @@ cmake -S "$WORK/llama.cpp" -B "$WORK/llama-android" -G Ninja \
   -DLLAMA_BUILD_TOOLS=ON
 cmake --build "$WORK/llama-android" --target llama mtmd
 find "$WORK/llama-android" -name '*.so' -exec cp {} "$OUT/" \;
+# Release builds keep symbols the app never needs (about 65 MB).
+STRIP=$(find "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt" -name llvm-strip | head -1)
+for library in "$OUT"/libllama.so "$OUT"/libmtmd.so "$OUT"/libggml*.so; do
+  "$STRIP" --strip-unneeded "$library"
+done
 
 # ONNX Runtime from the official Android package; the library is self-contained.
 curl -sSfL -o "$WORK/onnxruntime.aar" \

@@ -59,6 +59,8 @@ jobs:
         env:
           # bindgen parses the llama.cpp headers for the device, not the host.
           BINDGEN_EXTRA_CLANG_ARGS_aarch64_linux_android: --sysroot=${{ env.ANDROID_NDK_HOME }}/toolchains/llvm/prebuilt/linux-x86_64/sysroot
+          # The Android Gradle plugin does not strip the Rust library here.
+          CARGO_PROFILE_RELEASE_STRIP: symbols
         run: cargo tauri android build --ci --apk --target aarch64
       - name: Sign with a throwaway key
         run: |
