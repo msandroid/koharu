@@ -23,7 +23,7 @@ use koharu_ml::{
         KoharuLayoutDetection, KoharuLayoutDetections, KoharuLayoutMask, KoharuLayoutRFDetrSeg2XL,
         KoharuLayoutThresholds,
     },
-    onnx::ComicTextDetectorOnnx,
+    onnx::{ComicBubbleDetection, ComicBubbleDetectorOnnx, ComicTextDetectorOnnx},
 };
 use koharu_scene::{
     AssetInput, AssetMetadata, AssetRole, At, BubbleRegion, DetectionAnalysis, DetectionLabel,
@@ -42,6 +42,22 @@ const MODEL_ID: &str = "mayocream/koharu-layout-rfdetr-seg-2xl-1152";
 const MODEL_NAME: &str = "koharu-layout-rfdetr-seg-2xl";
 const COMIC_TEXT_MODEL_ID: &str = "mayocream/comic-text-detector-onnx";
 const COMIC_TEXT_MODEL_NAME: &str = "comic-text-detector-onnx";
+/// Bubble boxes below this score are ignored; the detector's own default.
+const BUBBLE_SCORE_THRESHOLD: f32 = 0.5;
+/// Largest luminance distance from a bubble's interior tone that still floods.
+const BUBBLE_FILL_TOLERANCE: u8 = 48;
+/// A flood fill covering less of the bubble box than this falls back to an ellipse.
+const BUBBLE_FILL_MIN_COVERAGE: f32 = 0.3;
+/// Background pixels needed to estimate a balloon's interior tone.
+const BUBBLE_MIN_SEEDS: usize = 16;
+/// Growth of the inscribed ellipse that bounds the fill; 1.15 reaches most of a
+/// rectangular caption box while keeping open tails from flooding the page.
+const BUBBLE_ELLIPSE_SCALE: f32 = 1.15;
+/// The comic text detector's refined mask hugs glyph strokes; growing it inside
+/// each block covers their anti-aliased halos so cleanup sees uniform balloon
+/// interiors, as it does with RF-DETR's looser text masks. Block bounds stay put
+/// so neighbouring columns do not start overlapping in layout NMS.
+const TEXT_MASK_HALO: u8 = 2;
 const PRODUCER: &str = "dev.koharu.pipeline.detection";
 const ANGLE_SNAP_DEGREES: f32 = 3.0;
 const ANGLE_SEARCH_HALF_STEPS: i32 = 90;
@@ -150,7 +166,10 @@ enum Model {
         network: Arc<Mutex<KoharuLayoutRFDetrSeg2XL>>,
         thresholds: KoharuLayoutThresholds,
     },
-    ComicText(Arc<Mutex<ComicTextDetectorOnnx>>),
+    ComicText {
+        text: Arc<Mutex<ComicTextDetectorOnnx>>,
+        bubbles: Arc<Mutex<ComicBubbleDetectorOnnx>>,
+    },
 }
 
 impl Model {
@@ -167,16 +186,17 @@ impl Model {
                     thresholds,
                 })
             }
-            DetectionModel::ComicTextDetectorOnnx {} => Ok(Self::ComicText(Arc::new(Mutex::new(
-                ComicTextDetectorOnnx::load().await?,
-            )))),
+            DetectionModel::ComicTextDetectorOnnx {} => Ok(Self::ComicText {
+                text: Arc::new(Mutex::new(ComicTextDetectorOnnx::load().await?)),
+                bubbles: Arc::new(Mutex::new(ComicBubbleDetectorOnnx::load().await?)),
+            }),
         }
     }
 
     fn id(&self) -> &'static str {
         match self {
             Self::Layout { .. } => MODEL_ID,
-            Self::ComicText(_) => COMIC_TEXT_MODEL_ID,
+            Self::ComicText { .. } => COMIC_TEXT_MODEL_ID,
         }
     }
 
@@ -207,14 +227,24 @@ impl Model {
                 })
                 .await
             }
-            Self::ComicText(network) => {
-                let network = network.clone();
+            Self::ComicText { text, bubbles } => {
+                let text = text.clone();
+                let bubbles = bubbles.clone();
                 tokio_rayon::spawn(move || {
-                    let network = network
+                    let (mask, blocks) = text
                         .lock()
-                        .map_err(|_| anyhow!("comic text detector lock is poisoned"))?;
-                    let (mask, blocks) = network.inference(&image)?;
-                    Ok(comic_text_detections(&mask, &blocks))
+                        .map_err(|_| anyhow!("comic text detector lock is poisoned"))?
+                        .inference(&image)?;
+                    let bubbles = bubbles
+                        .lock()
+                        .map_err(|_| anyhow!("bubble detector lock is poisoned"))?
+                        .inference(&image, BUBBLE_SCORE_THRESHOLD)?;
+                    Ok(comic_text_detections(
+                        &image.to_rgb8(),
+                        &mask,
+                        &blocks,
+                        &bubbles,
+                    ))
                 })
                 .await
             }
@@ -222,51 +252,206 @@ impl Model {
     }
 }
 
-/// Expresses comic text detector blocks as layout text detections.
+/// Expresses comic text detector blocks and detected bubbles as layout detections.
 ///
-/// The detector's refined mask holds text foreground pixels, the same signal
+/// The text detector's refined mask holds text foreground pixels, the same signal
 /// RF-DETR text masks carry, so each block takes the mask pixels inside its
-/// bounds. The detector finds no bubbles or panels; dialogue linking and
-/// typography then work from the text regions alone.
-fn comic_text_detections(mask: &GrayImage, blocks: &[TextBlock]) -> KoharuLayoutDetections {
-    let (image_width, image_height) = mask.dimensions();
-    let detections = blocks
+/// bounds. The bubble detector only returns boxes, so each bubble's mask is its
+/// flooded interior (see [`bubble_mask`]). Panels are not detected.
+fn comic_text_detections(
+    image: &RgbImage,
+    text_mask: &GrayImage,
+    blocks: &[TextBlock],
+    bubbles: &[ComicBubbleDetection],
+) -> KoharuLayoutDetections {
+    let (image_width, image_height) = text_mask.dimensions();
+    let text_mask = dilate(text_mask, Norm::LInf, TEXT_MASK_HALO);
+    let texts = blocks.iter().filter_map(|block| {
+        let mask = window(&text_mask, block.xyxy.map(|value| value as f32))?;
+        layout_detection("text", 0, 1.0, mask)
+    });
+    let bubbles = bubbles
         .iter()
-        .filter_map(|block| {
-            let [left, top, right, bottom] = block.xyxy;
-            let left = left.clamp(0, image_width as i32) as u32;
-            let top = top.clamp(0, image_height as i32) as u32;
-            let right = right.clamp(0, image_width as i32) as u32;
-            let bottom = bottom.clamp(0, image_height as i32) as u32;
-            if right <= left || bottom <= top {
-                return None;
-            }
-            let width = right - left;
-            let height = bottom - top;
-            let pixels = image::imageops::crop_imm(mask, left, top, width, height)
-                .to_image()
-                .into_raw();
-            let area = pixels.iter().filter(|value| **value != 0).count() as u32;
-            (area > 0).then(|| KoharuLayoutDetection {
-                label_id: 0,
-                label: "text".to_owned(),
-                score: 1.0,
-                bbox: [left as f32, top as f32, right as f32, bottom as f32],
-                area,
-                mask: KoharuLayoutMask {
-                    x: left,
-                    y: top,
-                    width,
-                    height,
-                    pixels,
-                },
-            })
-        })
-        .collect();
+        .filter(|bubble| bubble.label == "bubble")
+        .filter_map(|bubble| {
+            let mask = bubble_mask(image, &text_mask, bubble.bbox)?;
+            layout_detection("bubble", 2, bubble.score, mask)
+        });
     KoharuLayoutDetections {
         image_width,
         image_height,
-        detections,
+        detections: texts.chain(bubbles).collect(),
+    }
+}
+
+fn layout_detection(
+    label: &str,
+    label_id: usize,
+    score: f32,
+    mask: KoharuLayoutMask,
+) -> Option<KoharuLayoutDetection> {
+    let area = mask.pixels.iter().filter(|value| **value != 0).count() as u32;
+    (area > 0).then(|| KoharuLayoutDetection {
+        label_id,
+        label: label.to_owned(),
+        score,
+        bbox: [
+            mask.x as f32,
+            mask.y as f32,
+            (mask.x + mask.width) as f32,
+            (mask.y + mask.height) as f32,
+        ],
+        area,
+        mask,
+    })
+}
+
+/// Copies the pixels of `source` inside `bbox`, clamped to the image.
+fn window(source: &GrayImage, bbox: [f32; 4]) -> Option<KoharuLayoutMask> {
+    let [left, top, right, bottom] = mask_window(bbox, source.width(), source.height())?;
+    let (width, height) = (right - left, bottom - top);
+    Some(KoharuLayoutMask {
+        x: left,
+        y: top,
+        width,
+        height,
+        pixels: image::imageops::crop_imm(source, left, top, width, height)
+            .to_image()
+            .into_raw(),
+    })
+}
+
+/// Estimates a bubble's interior inside its detected box.
+///
+/// The fill starts from the central part of the box, crosses pixels within
+/// [`BUBBLE_FILL_TOLERANCE`] of the interior's median luminance as well as text
+/// strokes inside the inscribed ellipse, and stops at the balloon outline. It is confined to the box's
+/// inscribed ellipse grown by [`BUBBLE_ELLIPSE_SCALE`] so open tails cannot leak
+/// into the page. Enclosed holes are filled so the text sits inside the region,
+/// which dialogue linking measures by containment. Balloons that flood too
+/// little fall back to the inscribed ellipse.
+fn bubble_mask(
+    image: &RgbImage,
+    text_mask: &GrayImage,
+    bbox: [f32; 4],
+) -> Option<KoharuLayoutMask> {
+    let [left, top, right, bottom] = mask_window(bbox, image.width(), image.height())?;
+    let (width, height) = (right - left, bottom - top);
+    let index = |x: u32, y: u32| (y * width + x) as usize;
+    let luma = |x: u32, y: u32| {
+        let [r, g, b] = image.get_pixel(left + x, top + y).0;
+        ((u32::from(r) * 299 + u32::from(g) * 587 + u32::from(b) * 114) / 1000) as u8
+    };
+    let is_text = |x: u32, y: u32| text_mask.get_pixel(left + x, top + y)[0] != 0;
+    let ellipse = |x: u32, y: u32| {
+        let dx = (x as f32 + 0.5) / (width as f32 / 2.0) - 1.0;
+        let dy = (y as f32 + 0.5) / (height as f32 / 2.0) - 1.0;
+        dx * dx + dy * dy
+    };
+    let points = (0..height).flat_map(|y| (0..width).map(move |x| (x, y)));
+
+    // Text can cover the whole centre of a narrow balloon; widen the sampled
+    // area until it holds enough background pixels.
+    let seeds = [4, 8, u32::MAX].into_iter().find_map(|divisor| {
+        let (margin_x, margin_y) = (width / divisor, height / divisor);
+        let seeds = points
+            .clone()
+            .filter(|&(x, y)| {
+                x >= margin_x
+                    && x < width - margin_x
+                    && y >= margin_y
+                    && y < height - margin_y
+                    && ellipse(x, y) <= 1.0
+                    && !is_text(x, y)
+            })
+            .collect::<Vec<_>>();
+        (seeds.len() >= BUBBLE_MIN_SEEDS).then_some(seeds)
+    });
+    let mut pixels = vec![0u8; (width * height) as usize];
+    if let Some(seeds) = seeds {
+        let mut tones = seeds.iter().map(|&(x, y)| luma(x, y)).collect::<Vec<_>>();
+        let middle = tones.len() / 2;
+        let tone = *tones.select_nth_unstable(middle).1;
+        // Text masks can bleed across the outline, so text only carries the
+        // fill inside the inscribed ellipse.
+        let passable = |x: u32, y: u32| {
+            let distance = ellipse(x, y);
+            if is_text(x, y) {
+                distance <= 1.0
+            } else {
+                distance <= BUBBLE_ELLIPSE_SCALE * BUBBLE_ELLIPSE_SCALE
+                    && luma(x, y).abs_diff(tone) <= BUBBLE_FILL_TOLERANCE
+            }
+        };
+        let mut queue = seeds
+            .into_iter()
+            .filter(|&(x, y)| passable(x, y))
+            .collect::<VecDeque<_>>();
+        for &(x, y) in &queue {
+            pixels[index(x, y)] = u8::MAX;
+        }
+        while let Some((x, y)) = queue.pop_front() {
+            for (nx, ny) in neighbors(x, y, width, height) {
+                if pixels[index(nx, ny)] == 0 && passable(nx, ny) {
+                    pixels[index(nx, ny)] = u8::MAX;
+                    queue.push_back((nx, ny));
+                }
+            }
+        }
+        fill_holes(&mut pixels, width, height);
+    }
+
+    let filled = pixels.iter().filter(|value| **value != 0).count();
+    if (filled as f32) < BUBBLE_FILL_MIN_COVERAGE * (width * height) as f32 {
+        for (x, y) in points {
+            pixels[index(x, y)] = if ellipse(x, y) <= 1.0 { u8::MAX } else { 0 };
+        }
+    }
+    Some(KoharuLayoutMask {
+        x: left,
+        y: top,
+        width,
+        height,
+        pixels,
+    })
+}
+
+fn neighbors(x: u32, y: u32, width: u32, height: u32) -> impl Iterator<Item = (u32, u32)> {
+    [
+        (x.wrapping_sub(1), y),
+        (x + 1, y),
+        (x, y.wrapping_sub(1)),
+        (x, y + 1),
+    ]
+    .into_iter()
+    .filter(move |&(nx, ny)| nx < width && ny < height)
+}
+
+/// Marks every empty pixel that cannot reach the window border as filled.
+fn fill_holes(pixels: &mut [u8], width: u32, height: u32) {
+    let index = |x: u32, y: u32| (y * width + x) as usize;
+    let mut outside = vec![false; pixels.len()];
+    let mut queue = (0..height)
+        .flat_map(|y| (0..width).map(move |x| (x, y)))
+        .filter(|&(x, y)| {
+            (x == 0 || y == 0 || x + 1 == width || y + 1 == height) && pixels[index(x, y)] == 0
+        })
+        .collect::<VecDeque<_>>();
+    for &(x, y) in &queue {
+        outside[index(x, y)] = true;
+    }
+    while let Some((x, y)) = queue.pop_front() {
+        for (nx, ny) in neighbors(x, y, width, height) {
+            if !outside[index(nx, ny)] && pixels[index(nx, ny)] == 0 {
+                outside[index(nx, ny)] = true;
+                queue.push_back((nx, ny));
+            }
+        }
+    }
+    for (pixel, outside) in pixels.iter_mut().zip(outside) {
+        if !outside {
+            *pixel = u8::MAX;
+        }
     }
 }
 
@@ -2811,10 +2996,10 @@ mod tests {
     }
     #[test]
     fn comic_text_blocks_become_text_detections_with_their_mask_pixels() {
-        let mut mask = GrayImage::new(8, 6);
-        mask.put_pixel(2, 1, Luma([255]));
-        mask.put_pixel(3, 2, Luma([255]));
-        mask.put_pixel(7, 5, Luma([255]));
+        let mut mask = GrayImage::new(20, 12);
+        mask.put_pixel(5, 3, Luma([255]));
+        mask.put_pixel(6, 4, Luma([255]));
+        mask.put_pixel(19, 11, Luma([255]));
         let block = |xyxy| koharu_ml::comic_text_detector::TextBlock {
             xyxy,
             lines: Vec::new(),
@@ -2825,24 +3010,63 @@ mod tests {
         };
 
         let output = comic_text_detections(
+            &RgbImage::new(20, 12),
             &mask,
             &[
-                block([1, 0, 5, 4]),
-                block([-3, -3, 1, 1]),
-                block([6, 4, 20, 20]),
+                block([4, 2, 8, 6]),
+                block([13, 0, 15, 3]),
+                block([17, 9, 30, 30]),
             ],
+            &[],
         );
 
-        assert_eq!((output.image_width, output.image_height), (8, 6));
+        assert_eq!((output.image_width, output.image_height), (20, 12));
         assert_eq!(output.detections.len(), 2, "the empty block is dropped");
         let first = &output.detections[0];
         assert_eq!(first.label, "text");
-        assert_eq!(first.bbox, [1.0, 0.0, 5.0, 4.0]);
-        assert_eq!(first.area, 2);
-        assert!(first.mask.contains(2, 1) && first.mask.contains(3, 2));
-        assert!(!first.mask.contains(4, 3));
+        assert_eq!(first.bbox, [4.0, 2.0, 8.0, 6.0], "bounds stay on the block");
+        assert_eq!(first.area, 16, "the halo fills the 4x4 block window");
+        assert!(first.mask.contains(4, 2) && first.mask.contains(7, 5));
         let clamped = &output.detections[1];
-        assert_eq!(clamped.bbox, [6.0, 4.0, 8.0, 6.0]);
-        assert!(clamped.mask.contains(7, 5));
+        assert_eq!(clamped.bbox, [17.0, 9.0, 20.0, 12.0]);
+        assert!(clamped.mask.contains(19, 11));
+    }
+    #[test]
+    fn bubble_masks_flood_the_balloon_interior_through_text() {
+        // A white balloon with a black outline on a gray page, holding a black
+        // vertical text stroke that the text mask marks.
+        let mut image = RgbImage::from_pixel(40, 40, Rgb([128, 128, 128]));
+        let mut text_mask = GrayImage::new(40, 40);
+        for y in 0..40u32 {
+            for x in 0..40u32 {
+                let distance = ((x as f32 - 20.0).powi(2) + (y as f32 - 20.0).powi(2)).sqrt();
+                if distance <= 15.0 {
+                    image.put_pixel(x, y, Rgb([255, 255, 255]));
+                } else if distance <= 17.0 {
+                    image.put_pixel(x, y, Rgb([0, 0, 0]));
+                }
+            }
+        }
+        for y in 12..28 {
+            image.put_pixel(20, y, Rgb([0, 0, 0]));
+            text_mask.put_pixel(20, y, Luma([255]));
+        }
+        let bubble = koharu_ml::onnx::ComicBubbleDetection {
+            label: "bubble",
+            score: 0.9,
+            bbox: [2.0, 2.0, 38.0, 38.0],
+        };
+
+        let output = comic_text_detections(&image, &text_mask, &[], &[bubble]);
+
+        assert_eq!(output.detections.len(), 1);
+        let detection = &output.detections[0];
+        assert_eq!(detection.label, "bubble");
+        assert!(detection.mask.contains(10, 20), "interior is flooded");
+        assert!(detection.mask.contains(20, 20), "text strokes are inside");
+        assert!(
+            !detection.mask.contains(3, 3),
+            "the page outside the outline is excluded"
+        );
     }
 }

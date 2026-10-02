@@ -1,5 +1,8 @@
 //! Manga OCR through the Optimum ONNX export of the ViT/BERT encoder-decoder.
 //!
+//! The weights are the int8 dynamic quantization published by onnx-community,
+//! a quarter of the FP32 download; on manga balloon crops it reads the same text.
+//!
 //! Configuration, image processing, tokenization, and beam scoring come from the
 //! Torch port and the original checkpoint. The export has no past-key-value
 //! inputs, so every beam step re-runs the decoder over the full prefix; Manga OCR
@@ -24,9 +27,9 @@ crate::model_repository!("mayocream/manga-ocr" @ "4380edba990b959c50875235095535
     VOCABULARY = "vocab.txt",
 });
 
-crate::model_repository!("mayocream/manga-ocr-onnx" @ "24b12778d85800835e2ca409236de281b8ab7b9f" {
-    ENCODER = "encoder_model.onnx",
-    DECODER = "decoder_model.onnx",
+crate::model_repository!("onnx-community/manga-ocr-base-ONNX" @ "f9023406bb2f6b17df67bc4a327c56ecd20611f0" {
+    ENCODER = "onnx/encoder_model_int8.onnx",
+    DECODER = "onnx/decoder_model_int8.onnx",
 });
 
 #[derive(Debug)]

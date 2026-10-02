@@ -5,6 +5,11 @@
 //! padded with the symmetric reflection that the Torch port uses for its
 //! modulo-8 padding. Unmasked pixels are restored afterwards, matching
 //! `sd_keep_unmasked_area`.
+//!
+//! The weights are the weight-only FP16 quantization of `mayocream/lama-manga-onnx`
+//! (half the download, FP32 compute). It takes one `[1, 4, 512, 512]` input: the
+//! RGB image with holes zeroed, then the hole mask. The original export zeroes
+//! holes itself, so the packing does not change its output.
 
 use std::sync::Mutex;
 
@@ -17,8 +22,8 @@ use crate::lama::{
     processor::{orchestrate, resize_gray, resize_rgb, symmetric_index},
 };
 
-crate::model_repository!("mayocream/lama-manga-onnx" @ "b55497aadbfcb9740e1ed16f008268d71b4f3f79" {
-    WEIGHTS = "lama-manga.onnx",
+crate::model_repository!("Liiesl/lama-manga-onnx-quant" @ "51d07e18caf9b1258585d3706fec8986ccbb8cfb" {
+    WEIGHTS = "lama-manga_fp16.onnx",
 });
 
 const INPUT_SIZE: u32 = 512;
@@ -72,19 +77,19 @@ impl LaMaOnnx {
 
         let size = INPUT_SIZE as usize;
         let plane = size * size;
-        let mut pixels = vec![0.0f32; 3 * plane];
-        let mut holes = vec![0.0f32; plane];
+        let mut packed = vec![0.0f32; 4 * plane];
         for y in 0..INPUT_SIZE {
             let source_y = symmetric_index(y, scaled_height);
             for x in 0..INPUT_SIZE {
                 let source_x = symmetric_index(x, scaled_width);
                 let index = y as usize * size + x as usize;
+                if scaled_mask.get_pixel(source_x, source_y)[0] > 0 {
+                    packed[3 * plane + index] = 1.0;
+                    continue;
+                }
                 let pixel = scaled_image.get_pixel(source_x, source_y);
                 for channel in 0..3 {
-                    pixels[channel * plane + index] = f32::from(pixel[channel]) / 255.0;
-                }
-                if scaled_mask.get_pixel(source_x, source_y)[0] > 0 {
-                    holes[index] = 1.0;
+                    packed[channel * plane + index] = f32::from(pixel[channel]) / 255.0;
                 }
             }
         }
@@ -94,8 +99,7 @@ impl LaMaOnnx {
             .lock()
             .map_err(|_| anyhow!("LaMa session lock is poisoned"))?;
         let outputs = session.run(ort::inputs![
-            "image" => Tensor::from_array(([1usize, 3, size, size], pixels))?,
-            "mask" => Tensor::from_array(([1usize, 1, size, size], holes))?,
+            "input" => Tensor::from_array(([1usize, 4, size, size], packed))?,
         ])?;
         let (shape, output) = outputs["output"].try_extract_tensor::<f32>()?;
         ensure!(

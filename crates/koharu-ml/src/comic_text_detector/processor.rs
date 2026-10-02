@@ -154,6 +154,32 @@ pub fn rearranged_inference<F>(
 where
     F: Fn(&Tensor) -> Output,
 {
+    rearranged_detection(source, 1280, |composites| {
+        let tensors = composites
+            .iter()
+            .map(|composite| image_to_tensor(&DynamicImage::ImageRgb8(composite.clone()), device))
+            .collect::<Result<Vec<_>>>()?;
+        let outputs = forward(&Tensor::cat(&tensors, 0));
+        let maps = Tensor::cat(&[outputs.mask, outputs.line_maps], 1);
+        (0..composites.len())
+            .map(|index| tensor_to_f32_vec(maps.narrow(0, index as i64, 1).contiguous().view([-1])))
+            .collect()
+    })
+}
+
+/// Runs BallonsTranslator's rearranged inference for very tall or wide pages.
+///
+/// `forward` receives up to four `size`×`size` composites and returns, for each,
+/// the mask, shrink, and threshold maps as one `3`×`size`×`size` plane. Returns
+/// `None` when the page is not elongated enough to need rearrangement.
+pub(crate) fn rearranged_detection<F>(
+    source: &DynamicImage,
+    size: u32,
+    mut forward: F,
+) -> Result<Option<(GrayImage, Vec<TextBlock>)>>
+where
+    F: FnMut(&[RgbImage]) -> Result<Vec<Vec<f32>>>,
+{
     // https://github.com/dmMaze/BallonsTranslator/blob/4bcc635c19f6c63a902872cf77b3d554e14ed1b7/ballontranslator/modules/textdetector/ctd/inference.py#L23-L150
     let (source_width, source_height) = source.dimensions();
     if source_width == 0 || source_height == 0 {
@@ -167,7 +193,7 @@ where
         (source_width, source_height)
     };
     let aspect_ratio = height as f32 / width as f32;
-    let downscale_ratio = height as f32 / 1280.0;
+    let downscale_ratio = height as f32 / size as f32;
     if downscale_ratio <= 2.5 || aspect_ratio <= 3.0 {
         return Ok(None);
     }
@@ -178,7 +204,7 @@ where
     } else {
         source.to_rgb8()
     };
-    let strips_per_composite = ((2 * 1280) / width).max(2) as usize;
+    let strips_per_composite = ((2 * size) / width).max(2) as usize;
     let patch_height = width
         .checked_mul(strips_per_composite as u32)
         .context("comic text detector rearranged patch is too large")?;
@@ -198,11 +224,11 @@ where
 
     for first_composite in (0..composite_count).step_by(4) {
         let batch_len = 4.min(composite_count - first_composite);
-        let mut tensors = Vec::with_capacity(batch_len);
+        let mut composites = Vec::with_capacity(batch_len);
         let mut padding = Vec::with_capacity(batch_len);
         for offset in 0..batch_len {
             let composite_index = first_composite + offset;
-            let square_size = patch_height.max(1280);
+            let square_size = patch_height.max(size);
             let mut composite = RgbImage::new(square_size, square_size);
             for strip_index in 0..strips_per_composite {
                 let patch_index = composite_index * strips_per_composite + strip_index;
@@ -230,8 +256,8 @@ where
                     );
                 }
             }
-            let mut resized = RgbImage::new(1280, 1280);
-            if square_size == 1280 {
+            let mut resized = RgbImage::new(size, size);
+            if square_size == size {
                 resized = composite;
             } else {
                 Resizer::new()
@@ -244,21 +270,37 @@ where
                         anyhow!("failed to resize rearranged comic text batch: {error}")
                     })?;
             }
-            tensors.push(image_to_tensor(&DynamicImage::ImageRgb8(resized), device)?);
-            padding.push(1280u32.saturating_sub(patch_height));
+            composites.push(resized);
+            padding.push(size.saturating_sub(patch_height));
         }
-        let batch = Tensor::cat(&tensors, 0);
-        let outputs = forward(&batch);
-        let maps = Tensor::cat(&[outputs.mask, outputs.line_maps], 1);
-        for (local_index, &pad) in padding.iter().enumerate() {
-            let mut map = maps.narrow(0, local_index as i64, 1);
-            if pad > 0 {
-                let output_pad = map.size()[3] as u32 * pad / 1280;
-                let keep = map.size()[3] - output_pad as i64;
-                map = map.narrow(2, 0, keep).narrow(3, 0, keep);
+        let maps = forward(&composites)?;
+        if maps.len() != composites.len() {
+            bail!(
+                "comic text detector returned {} maps for {} composites",
+                maps.len(),
+                composites.len()
+            );
+        }
+        for (map, pad) in maps.into_iter().zip(padding) {
+            let plane = size as usize * size as usize;
+            if map.len() != 3 * plane {
+                bail!("comic text detector map holds {} values", map.len());
             }
-            map_size = map.size()[3] as u32;
-            composite_maps.push(tensor_to_f32_vec(map.contiguous().view([-1]))?);
+            let keep = size - pad;
+            map_size = keep;
+            composite_maps.push(if keep == size {
+                map
+            } else {
+                map.chunks_exact(plane)
+                    .flat_map(|channel| {
+                        channel
+                            .chunks_exact(size as usize)
+                            .take(keep as usize)
+                            .flat_map(|row| &row[..keep as usize])
+                    })
+                    .copied()
+                    .collect()
+            });
         }
     }
 

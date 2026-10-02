@@ -8,6 +8,7 @@
 //! ONNX Runtime is loaded dynamically. Applications either call [`init`] with the
 //! bundled library path or set `ORT_DYLIB_PATH` before the first session loads.
 
+pub mod comic_bubble_detector;
 pub mod comic_text_detector;
 pub mod lama;
 pub mod manga_ocr;
@@ -24,7 +25,10 @@ use ort::{
 };
 
 pub use self::{
-    comic_text_detector::ComicTextDetectorOnnx, lama::LaMaOnnx, manga_ocr::MangaOcrOnnx,
+    comic_bubble_detector::{ComicBubbleDetection, ComicBubbleDetectorOnnx},
+    comic_text_detector::ComicTextDetectorOnnx,
+    lama::LaMaOnnx,
+    manga_ocr::MangaOcrOnnx,
 };
 
 static LIBRARY: OnceLock<Option<PathBuf>> = OnceLock::new();
@@ -80,6 +84,10 @@ pub(crate) fn session(model: &Path) -> Result<Session> {
         // Idle pool threads would otherwise busy-wait between runs, starving the
         // llama.cpp translator that shares the CPU and draining phone batteries.
         .with_intra_op_spinning(false)
+        .map_err(message)?
+        // The comic text detector's activations decay into subnormal floats, which
+        // made its CPU run about 11x slower; flushing them leaves outputs unchanged.
+        .with_flush_to_zero()
         .map_err(message)?
         .with_execution_providers(execution_providers())
         .map_err(message)?

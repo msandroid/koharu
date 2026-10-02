@@ -18,20 +18,39 @@ local GGUF model (llama.cpp) or a hosted provider.
 
 The pipeline gained three model choices that never touch libtorch:
 
-| Stage | Choice | Weights |
-| --- | --- | --- |
-| Detection | `comic-text-detector-onnx` | `mayocream/comic-text-detector-onnx` |
-| OCR | `manga-ocr-onnx` | `mayocream/manga-ocr-onnx` (+ config from `mayocream/manga-ocr`) |
-| Inpainting | `lama-onnx` | `mayocream/lama-manga-onnx` |
+| Stage | Choice | Weights | Download |
+| --- | --- | --- | --- |
+| Detection (text) | `comic-text-detector-onnx` | `mayocream/comic-text-detector-onnx` | 95 MB |
+| Detection (bubbles) | part of `comic-text-detector-onnx` | `ogkalu/comic-text-and-bubble-detector` (`detector-v4-s_int8.onnx`) | 11 MB |
+| OCR | `manga-ocr-onnx` | `onnx-community/manga-ocr-base-ONNX` int8 (+ config from `mayocream/manga-ocr`) | 117 MB |
+| Inpainting | `lama-onnx` | `Liiesl/lama-manga-onnx-quant` weight-only FP16 | 109 MB |
+
+About 332 MB in total, against 760 MB for the FP32 exports. On this page's balloon
+crops the int8 Manga OCR reads the same text as FP32, and the FP16 LaMa differs from
+FP32 by 0.01/255 on average inside the mask. The int8 LaMa (max error 167/255) and
+the FP16 Manga OCR decoder (rejected by ONNX Runtime's type checker) were not used.
 
 They live in `koharu_ml::onnx` and share preprocessing, decoding, beam scoring, and
 IOPaint crop orchestration with the Torch ports, so only the forward pass differs.
-Comic text detector blocks are expressed as layout text detections, so the
-detection stage's typography inference, scene writing, and masks are reused.
+Comic text detector blocks and bubble boxes are expressed as layout detections, so
+the detection stage's typography inference, dialogue linking, scene writing, and
+masks are reused:
+
+- **Text** keeps only line groups confirmed by the detector's YOLOv5 block head,
+  which drops page furniture such as copyright lines. Each block's mask is the
+  refined text mask grown by 2 px inside the block, covering glyph halos.
+- **Bubbles** get a mask from a flood fill of the balloon interior bounded by the
+  outline and a slightly grown inscribed ellipse. Uniform balloons are then
+  flat-filled instead of inpainted, as on desktop; LaMa leaves faint glyph ghosts
+  when given a whole balloon column.
+- **Tall strips** use the Torch port's rearranged inference, now shared with the
+  ONNX detector.
 
 ONNX Runtime is loaded dynamically (`ort` with `load-dynamic`). Point
 `ORT_DYLIB_PATH` at `libonnxruntime` or call `koharu_ml::onnx::init` with the
-bundled path.
+bundled path. Sessions flush subnormal floats to zero: the comic text detector's
+activations decay into subnormals and ran about 11x slower without it, with
+bit-identical outputs either way.
 
 ```bash
 ORT_DYLIB_PATH=/path/to/libonnxruntime.so \
@@ -45,25 +64,16 @@ Measured on a 4-core x86 Linux container, CPU only, debug build, 768×1086 page:
 
 | Stage | Torch desktop models | ONNX mobile models |
 | --- | --- | --- |
-| Detection | 5.3 s (RF-DETR) | 36.4 s (CTD) |
-| OCR | 7.9 s | 8.3 s |
-| Inpainting | 6.0 s | 20.7 s |
-| Translation (gemma4-e2b-it) | 61.3 s | 69.0 s |
-| Process wall time incl. model loading | 4 m 54 s | 1 m 57 s |
-
-Detection is dominated by ONNX Runtime's x86 CPU `ConvTranspose` kernel (about 25 s
-across the U-Net decoder's four 4×4 stride-2 layers). Core ML and XNNPACK implement
-transposed convolution natively, so device numbers have to be measured in phase 2.
-Rewriting those layers as sub-pixel convolutions is the fallback if phones without a
-capable NNAPI driver stay slow.
+| Detection | 5.3 s (RF-DETR) | 3.1 s (CTD + bubbles) |
+| OCR | 7.9 s | 2.7 s |
+| Inpainting | 6.0 s | 11.5 s |
+| Translation (gemma4-e2b-it) | 61.3 s | 59.5 s |
+| Process wall time incl. model loading | 4 m 54 s | 1 m 11 s |
 
 Known differences from the desktop defaults:
 
-- The comic text detector finds no bubbles or panels, so text is not linked to a
-  balloon shape and layout falls back to the text region.
-- Very tall webtoon strips are letterboxed whole; the Torch port's rearranged
-  inference for strips is not ported yet.
-- Page furniture such as copyright lines is detected as text.
+- Panels are not detected.
+- Text outside balloons that the YOLOv5 head misses is not translated.
 
 ## Phase 2: mobile packaging
 
@@ -78,8 +88,8 @@ Known differences from the desktop defaults:
    desktop-only plugins (updater, window state, single instance), and exposes the
    pipeline commands. Generate the Xcode and Android Studio projects with
    `tauri ios init` / `tauri android init`.
-4. **Model delivery.** Download the ONNX set (about 760 MB at fp32) on first launch
-   with progress; evaluate the int8/fp16 Manga OCR exports to cut it roughly in half.
+4. **Model delivery.** Download the ONNX set (about 332 MB) on first launch with
+   progress, and work around `hf-hub` failing on Xet-backed large files behind proxies.
 
 ## Phase 3: mobile UI
 
