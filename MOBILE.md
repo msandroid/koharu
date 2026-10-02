@@ -138,10 +138,19 @@ Open items:
 
 - Android was built end to end with the same steps as CI (NDK 27, release,
   arm64): the signed APK is 94 MB and holds the app library plus llama.cpp and
-  ONNX Runtime. It has not been run on a phone yet; there is no emulator here
-  (no KVM). The first real build found two problems, both fixed: the generated
-  loaders needed `libc` on Android, and the release APK kept about 90 MB of
-  debug symbols.
+  ONNX Runtime. It has not been run on a phone yet. The first real build found
+  two problems, both fixed: the generated loaders needed `libc` on Android, and
+  the release APK kept about 90 MB of debug symbols.
+- An x86_64 build (`ANDROID_ABI=x86_64 scripts/mobile/android-native.sh`, then
+  `--target x86_64`) was installed on an Android 15 emulator running without
+  KVM (software emulation, `-accel off`). The engine loads ONNX Runtime and the
+  models and runs detection. This found a crash: ONNX Runtime's NNAPI provider
+  divides by zero (SIGFPE) while creating a session when NNAPI exposes no
+  accelerator, so Android now defaults to XNNPACK; `KOHARU_ONNX_PROVIDERS`
+  (`nnapi,xnnpack`, `cpu`, ...) overrides the choice. Software emulation is
+  far too slow to time a page (detection alone ran over 50 minutes), and the
+  emulator's WebView renderer crashes during startup, so the UI and timings
+  still need a phone.
 - iOS has not been built: Xcode only runs on macOS. Run the Mobile workflow on
   GitHub Actions to verify it.
 - The `koharu-ml` crate still compiles the Torch bindings on mobile (they are

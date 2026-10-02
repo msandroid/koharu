@@ -14,6 +14,7 @@ pub mod lama;
 pub mod manga_ocr;
 
 use std::{
+    num::NonZeroUsize,
     path::{Path, PathBuf},
     sync::OnceLock,
 };
@@ -95,22 +96,55 @@ fn default_library() -> PathBuf {
 /// ONNX Runtime falls back to the next provider, and finally the CPU, for any
 /// operator or platform that a provider cannot serve.
 fn execution_providers() -> Vec<ExecutionProviderDispatch> {
-    let mut providers = Vec::new();
-    if cfg!(any(target_os = "ios", target_os = "macos")) {
-        providers.push(
-            ort::ep::CoreML::default()
-                .with_subgraphs(true)
-                .with_static_input_shapes(true)
-                .build(),
-        );
+    let threads = std::thread::available_parallelism().unwrap_or(NonZeroUsize::MIN);
+    provider_names()
+        .into_iter()
+        .filter_map(|name| match name {
+            "coreml" => Some(
+                ort::ep::CoreML::default()
+                    .with_subgraphs(true)
+                    .with_static_input_shapes(true)
+                    .build(),
+            ),
+            "nnapi" => Some(ort::ep::NNAPI::default().with_fp16(true).build()),
+            // XNNPACK runs its own thread pool; left unset, it has none.
+            "xnnpack" => Some(
+                ort::ep::XNNPACK::default()
+                    .with_intra_op_num_threads(threads)
+                    .build(),
+            ),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Provider names in preference order. `KOHARU_ONNX_PROVIDERS` (for example
+/// `xnnpack` or `cpu`) overrides the platform default, for devices whose
+/// accelerator drivers misbehave.
+fn provider_names() -> Vec<&'static str> {
+    const KNOWN: [&str; 4] = ["coreml", "nnapi", "xnnpack", "cpu"];
+    if let Ok(names) = std::env::var("KOHARU_ONNX_PROVIDERS") {
+        return names
+            .split(',')
+            .filter_map(|name| {
+                KNOWN
+                    .into_iter()
+                    .find(|known| known.eq_ignore_ascii_case(name.trim()))
+            })
+            .collect();
     }
-    if cfg!(target_os = "android") {
-        providers.push(ort::ep::NNAPI::default().with_fp16(true).build());
+    if cfg!(target_os = "ios") {
+        vec!["coreml", "xnnpack"]
+    } else if cfg!(target_os = "macos") {
+        vec!["coreml"]
+    } else if cfg!(target_os = "android") {
+        // NNAPI is deprecated since Android 15, and ONNX Runtime's NNAPI
+        // provider divides by zero (SIGFPE, killing the app) on devices whose
+        // NNAPI exposes no accelerator. Opt in with `KOHARU_ONNX_PROVIDERS`.
+        vec!["xnnpack"]
+    } else {
+        Vec::new()
     }
-    if cfg!(any(target_os = "ios", target_os = "android")) {
-        providers.push(ort::ep::XNNPACK::default().build());
-    }
-    providers
 }
 
 pub(crate) fn session(model: &Path) -> Result<Session> {
