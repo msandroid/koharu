@@ -17,9 +17,13 @@ use imageproc::{
     geometry::{approximate_polygon_dp, arc_length, contour_area},
     morphology::{close, dilate},
 };
-use koharu_ml::koharu_layout_rfdetr_seg_2xl::{
-    KoharuLayoutDetection, KoharuLayoutDetections, KoharuLayoutMask, KoharuLayoutRFDetrSeg2XL,
-    KoharuLayoutThresholds,
+use koharu_ml::{
+    comic_text_detector::TextBlock,
+    koharu_layout_rfdetr_seg_2xl::{
+        KoharuLayoutDetection, KoharuLayoutDetections, KoharuLayoutMask, KoharuLayoutRFDetrSeg2XL,
+        KoharuLayoutThresholds,
+    },
+    onnx::ComicTextDetectorOnnx,
 };
 use koharu_scene::{
     AssetInput, AssetMetadata, AssetRole, At, BubbleRegion, DetectionAnalysis, DetectionLabel,
@@ -36,6 +40,8 @@ use crate::{DetectionModel, ModelCell};
 
 const MODEL_ID: &str = "mayocream/koharu-layout-rfdetr-seg-2xl-1152";
 const MODEL_NAME: &str = "koharu-layout-rfdetr-seg-2xl";
+const COMIC_TEXT_MODEL_ID: &str = "mayocream/comic-text-detector-onnx";
+const COMIC_TEXT_MODEL_NAME: &str = "comic-text-detector-onnx";
 const PRODUCER: &str = "dev.koharu.pipeline.detection";
 const ANGLE_SNAP_DEGREES: f32 = 3.0;
 const ANGLE_SEARCH_HALF_STEPS: i32 = 90;
@@ -65,23 +71,25 @@ pub(super) struct Processor {
 
 impl Processor {
     pub(super) fn new(mut config: DetectionModel, device: koharu_ml::Device) -> Self {
-        let DetectionModel::KoharuLayoutRFDetrSeg2XL(settings) = &mut config;
-        for (name, value) in [
-            ("text", &mut settings.text_threshold),
-            ("bubble", &mut settings.bubble_threshold),
-            ("panel", &mut settings.panel_threshold),
-        ] {
-            // A stored threshold is only a preference; refusing to start over one
-            // leaves the application unusable until the file is edited by hand.
-            if let Some(threshold) = *value
-                && !(threshold.is_finite() && (0.0..=1.0).contains(&threshold))
-            {
-                tracing::warn!(
-                    label = name,
-                    threshold = %threshold,
-                    "confidence threshold is not between zero and one; using the model default"
-                );
-                *value = None;
+        // Only the layout detector has thresholds to sanitize.
+        if let DetectionModel::KoharuLayoutRFDetrSeg2XL(settings) = &mut config {
+            for (name, value) in [
+                ("text", &mut settings.text_threshold),
+                ("bubble", &mut settings.bubble_threshold),
+                ("panel", &mut settings.panel_threshold),
+            ] {
+                // A stored threshold is only a preference; refusing to start over one
+                // leaves the application unusable until the file is edited by hand.
+                if let Some(threshold) = *value
+                    && !(threshold.is_finite() && (0.0..=1.0).contains(&threshold))
+                {
+                    tracing::warn!(
+                        label = name,
+                        threshold = %threshold,
+                        "confidence threshold is not between zero and one; using the model default"
+                    );
+                    *value = None;
+                }
             }
         }
 
@@ -96,7 +104,10 @@ impl Processor {
 #[async_trait]
 impl StageProcessor for Processor {
     fn model(&self) -> &'static str {
-        MODEL_NAME
+        match self.config {
+            DetectionModel::KoharuLayoutRFDetrSeg2XL(_) => MODEL_NAME,
+            DetectionModel::ComicTextDetectorOnnx {} => COMIC_TEXT_MODEL_NAME,
+        }
     }
 
     fn skip(&self, input: &StageInput) -> Result<bool> {
@@ -134,23 +145,39 @@ impl StageProcessor for Processor {
     }
 }
 
-struct Model {
-    network: Arc<Mutex<KoharuLayoutRFDetrSeg2XL>>,
-    thresholds: KoharuLayoutThresholds,
+enum Model {
+    Layout {
+        network: Arc<Mutex<KoharuLayoutRFDetrSeg2XL>>,
+        thresholds: KoharuLayoutThresholds,
+    },
+    ComicText(Arc<Mutex<ComicTextDetectorOnnx>>),
 }
 
 impl Model {
     async fn load(device: koharu_ml::Device, config: &DetectionModel) -> Result<Self> {
-        let DetectionModel::KoharuLayoutRFDetrSeg2XL(config) = config;
-        let network = KoharuLayoutRFDetrSeg2XL::load(device).await?;
-        let mut thresholds = network.recommended_thresholds();
-        thresholds.text = config.text_threshold.unwrap_or(thresholds.text);
-        thresholds.bubble = config.bubble_threshold.unwrap_or(thresholds.bubble);
-        thresholds.panel = config.panel_threshold.unwrap_or(thresholds.panel);
-        Ok(Self {
-            network: Arc::new(Mutex::new(network)),
-            thresholds,
-        })
+        match config {
+            DetectionModel::KoharuLayoutRFDetrSeg2XL(config) => {
+                let network = KoharuLayoutRFDetrSeg2XL::load(device).await?;
+                let mut thresholds = network.recommended_thresholds();
+                thresholds.text = config.text_threshold.unwrap_or(thresholds.text);
+                thresholds.bubble = config.bubble_threshold.unwrap_or(thresholds.bubble);
+                thresholds.panel = config.panel_threshold.unwrap_or(thresholds.panel);
+                Ok(Self::Layout {
+                    network: Arc::new(Mutex::new(network)),
+                    thresholds,
+                })
+            }
+            DetectionModel::ComicTextDetectorOnnx {} => Ok(Self::ComicText(Arc::new(Mutex::new(
+                ComicTextDetectorOnnx::load().await?,
+            )))),
+        }
+    }
+
+    fn id(&self) -> &'static str {
+        match self {
+            Self::Layout { .. } => MODEL_ID,
+            Self::ComicText(_) => COMIC_TEXT_MODEL_ID,
+        }
     }
 
     async fn run(&self, input: StageInput) -> Result<koharu_scene::Patch> {
@@ -161,19 +188,85 @@ impl Model {
             .await?
             .ok_or_else(|| anyhow!("page {page} has no source image"))?;
         let output = self.detect(image.clone()).await?;
-        build_patch(&input, &image, output, &generation(PRODUCER, MODEL_ID)?).await
+        build_patch(&input, &image, output, &generation(PRODUCER, self.id())?).await
     }
 
     async fn detect(&self, image: Arc<DynamicImage>) -> Result<KoharuLayoutDetections> {
-        let network = self.network.clone();
-        let thresholds = self.thresholds;
-        tokio_rayon::spawn(move || {
-            let network = network
-                .lock()
-                .map_err(|_| anyhow!("layout model lock is poisoned"))?;
-            network.inference_with_thresholds(&image, thresholds)
+        match self {
+            Self::Layout {
+                network,
+                thresholds,
+            } => {
+                let network = network.clone();
+                let thresholds = *thresholds;
+                tokio_rayon::spawn(move || {
+                    let network = network
+                        .lock()
+                        .map_err(|_| anyhow!("layout model lock is poisoned"))?;
+                    network.inference_with_thresholds(&image, thresholds)
+                })
+                .await
+            }
+            Self::ComicText(network) => {
+                let network = network.clone();
+                tokio_rayon::spawn(move || {
+                    let network = network
+                        .lock()
+                        .map_err(|_| anyhow!("comic text detector lock is poisoned"))?;
+                    let (mask, blocks) = network.inference(&image)?;
+                    Ok(comic_text_detections(&mask, &blocks))
+                })
+                .await
+            }
+        }
+    }
+}
+
+/// Expresses comic text detector blocks as layout text detections.
+///
+/// The detector's refined mask holds text foreground pixels, the same signal
+/// RF-DETR text masks carry, so each block takes the mask pixels inside its
+/// bounds. The detector finds no bubbles or panels; dialogue linking and
+/// typography then work from the text regions alone.
+fn comic_text_detections(mask: &GrayImage, blocks: &[TextBlock]) -> KoharuLayoutDetections {
+    let (image_width, image_height) = mask.dimensions();
+    let detections = blocks
+        .iter()
+        .filter_map(|block| {
+            let [left, top, right, bottom] = block.xyxy;
+            let left = left.clamp(0, image_width as i32) as u32;
+            let top = top.clamp(0, image_height as i32) as u32;
+            let right = right.clamp(0, image_width as i32) as u32;
+            let bottom = bottom.clamp(0, image_height as i32) as u32;
+            if right <= left || bottom <= top {
+                return None;
+            }
+            let width = right - left;
+            let height = bottom - top;
+            let pixels = image::imageops::crop_imm(mask, left, top, width, height)
+                .to_image()
+                .into_raw();
+            let area = pixels.iter().filter(|value| **value != 0).count() as u32;
+            (area > 0).then(|| KoharuLayoutDetection {
+                label_id: 0,
+                label: "text".to_owned(),
+                score: 1.0,
+                bbox: [left as f32, top as f32, right as f32, bottom as f32],
+                area,
+                mask: KoharuLayoutMask {
+                    x: left,
+                    y: top,
+                    width,
+                    height,
+                    pixels,
+                },
+            })
         })
-        .await
+        .collect();
+    KoharuLayoutDetections {
+        image_width,
+        image_height,
+        detections,
     }
 }
 
@@ -1832,7 +1925,7 @@ fn area(bounds: [f32; 4]) -> f32 {
 
 #[cfg(test)]
 mod tests {
-    use image::{Rgb, RgbImage};
+    use image::{GrayImage, Luma, Rgb, RgbImage};
     use imageproc::{
         distance_transform::Norm,
         morphology::{close, dilate},
@@ -1846,9 +1939,9 @@ mod tests {
     use super::{
         DIALOGUE_MASK_CONTAINMENT_THRESHOLD, DetectedRegion, DetectedText, DetectionModel,
         ImageSize, KoharuLayoutRFDetrSeg2XLConfig, MaskPixel, PageRegions, Processor, RegionOutput,
-        StageInput, StageProcessor, closed_mask_for, color_palette, generation, infer_typography,
-        layout_order, link_dialogue_regions, mask_containment, mask_for, mask_geometry,
-        non_maximum_suppression, normalize_text_color, write_region,
+        StageInput, StageProcessor, closed_mask_for, color_palette, comic_text_detections,
+        generation, infer_typography, layout_order, link_dialogue_regions, mask_containment,
+        mask_for, mask_geometry, non_maximum_suppression, normalize_text_color, write_region,
     };
 
     #[test]
@@ -1862,7 +1955,9 @@ mod tests {
             koharu_ml::Device::cpu(),
         );
 
-        let DetectionModel::KoharuLayoutRFDetrSeg2XL(settings) = &processor.config;
+        let DetectionModel::KoharuLayoutRFDetrSeg2XL(settings) = &processor.config else {
+            panic!("the layout detector configuration is kept");
+        };
         assert_eq!(settings.text_threshold, None);
         assert_eq!(settings.bubble_threshold, None);
         assert_eq!(settings.panel_threshold, Some(0.55));
@@ -2713,5 +2808,41 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert!(color_palette(&pixels).len() <= 16 * 16 * 16);
+    }
+    #[test]
+    fn comic_text_blocks_become_text_detections_with_their_mask_pixels() {
+        let mut mask = GrayImage::new(8, 6);
+        mask.put_pixel(2, 1, Luma([255]));
+        mask.put_pixel(3, 2, Luma([255]));
+        mask.put_pixel(7, 5, Luma([255]));
+        let block = |xyxy| koharu_ml::comic_text_detector::TextBlock {
+            xyxy,
+            lines: Vec::new(),
+            language: "ja".to_owned(),
+            vertical: true,
+            angle: 0,
+            detected_font_size: 12.0,
+        };
+
+        let output = comic_text_detections(
+            &mask,
+            &[
+                block([1, 0, 5, 4]),
+                block([-3, -3, 1, 1]),
+                block([6, 4, 20, 20]),
+            ],
+        );
+
+        assert_eq!((output.image_width, output.image_height), (8, 6));
+        assert_eq!(output.detections.len(), 2, "the empty block is dropped");
+        let first = &output.detections[0];
+        assert_eq!(first.label, "text");
+        assert_eq!(first.bbox, [1.0, 0.0, 5.0, 4.0]);
+        assert_eq!(first.area, 2);
+        assert!(first.mask.contains(2, 1) && first.mask.contains(3, 2));
+        assert!(!first.mask.contains(4, 3));
+        let clamped = &output.detections[1];
+        assert_eq!(clamped.bbox, [6.0, 4.0, 8.0, 6.0]);
+        assert!(clamped.mask.contains(7, 5));
     }
 }

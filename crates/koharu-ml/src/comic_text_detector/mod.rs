@@ -1,5 +1,5 @@
 mod model;
-mod processor;
+pub(crate) mod processor;
 
 use anyhow::{Context, Result};
 use image::DynamicImage;

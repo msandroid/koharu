@@ -63,6 +63,8 @@ impl Committer for SessionCommitter<'_> {
 enum DetectionChoice {
     #[value(name = "koharu-layout-rfdetr-seg-2xl")]
     KoharuLayoutRFDetrSeg2XL,
+    #[value(name = "comic-text-detector-onnx")]
+    ComicTextDetectorOnnx,
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -71,6 +73,8 @@ enum OcrChoice {
     PaddleOcrVl1_6,
     #[value(name = "manga-ocr")]
     MangaOcr,
+    #[value(name = "manga-ocr-onnx")]
+    MangaOcrOnnx,
     #[value(name = "baberu-ocr")]
     BaberuOcr,
     #[value(name = "hayai-ocr")]
@@ -81,6 +85,8 @@ enum OcrChoice {
 enum InpaintingChoice {
     #[value(name = "lama")]
     LaMa,
+    #[value(name = "lama-onnx")]
+    LaMaOnnx,
     #[value(name = "aot-inpainting")]
     AotInpainting,
     #[value(name = "flux2-klein")]
@@ -98,10 +104,12 @@ impl Arguments {
                         KoharuLayoutRFDetrSeg2XLConfig::default(),
                     )
                 }
+                DetectionChoice::ComicTextDetectorOnnx => DetectionModel::ComicTextDetectorOnnx {},
             },
             ocr: match self.ocr {
                 OcrChoice::PaddleOcrVl1_6 => OcrModel::PaddleOcrVl1_6,
                 OcrChoice::MangaOcr => OcrModel::MangaOcr,
+                OcrChoice::MangaOcrOnnx => OcrModel::MangaOcrOnnx,
                 OcrChoice::BaberuOcr => OcrModel::BaberuOcr,
                 OcrChoice::HayaiOcr => OcrModel::HayaiOcr,
             },
@@ -119,6 +127,7 @@ impl Arguments {
             },
             inpainting: match self.inpainting {
                 InpaintingChoice::LaMa => InpaintingModel::LaMa {},
+                InpaintingChoice::LaMaOnnx => InpaintingModel::LaMaOnnx {},
                 InpaintingChoice::AotInpainting => InpaintingModel::AotInpainting {},
                 InpaintingChoice::Flux2Klein => {
                     InpaintingModel::Flux2Klein(Flux2KleinConfig::default())

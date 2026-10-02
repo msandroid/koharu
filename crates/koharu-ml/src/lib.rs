@@ -19,6 +19,7 @@ pub mod lama;
 pub mod llm;
 pub mod manga_ocr;
 pub mod manga_text_mask;
+pub mod onnx;
 pub mod paddle_ocr_vl;
 pub mod paddle_ocr_vl_quantized;
 pub mod pp_doclayout_v3;

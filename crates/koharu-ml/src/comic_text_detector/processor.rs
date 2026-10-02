@@ -37,17 +37,27 @@ pub struct TextBlock {
 }
 
 pub fn preprocess(image: &DynamicImage, device: Device) -> Result<(Tensor, [u32; 4])> {
+    let (letterboxed, dimensions) = letterbox(image, 1280)?;
+    let pixel_values = image_to_tensor(&DynamicImage::ImageRgb8(letterboxed), device)?;
+    Ok((pixel_values, dimensions))
+}
+
+/// Letterboxes `image` into a `size`×`size` canvas and returns the canvas with
+/// `[original_width, original_height, resized_width, resized_height]`.
+///
+/// `preprocess_img` letterboxes uint8 pixels with linear interpolation, pads
+/// only the bottom/right edges, then converts RGB HWC to float CHW.
+/// https://github.com/dmMaze/BallonsTranslator/blob/4bcc635c19f6c63a902872cf77b3d554e14ed1b7/ballontranslator/modules/textdetector/ctd/inference.py#L206-L220
+pub(crate) fn letterbox(image: &DynamicImage, size: u32) -> Result<(RgbImage, [u32; 4])> {
     let (original_width, original_height) = image.dimensions();
     if original_width == 0 || original_height == 0 {
         bail!("empty image");
     }
 
-    let scale = (1280.0 / original_width as f64).min(1280.0 / original_height as f64);
+    let scale =
+        (f64::from(size) / original_width as f64).min(f64::from(size) / original_height as f64);
     let resized_width = ((original_width as f64 * scale).round_ties_even() as u32).max(1);
     let resized_height = ((original_height as f64 * scale).round_ties_even() as u32).max(1);
-    // `preprocess_img` letterboxes uint8 pixels with linear interpolation,
-    // pads only the bottom/right edges, then converts RGB HWC to float CHW.
-    // https://github.com/dmMaze/BallonsTranslator/blob/4bcc635c19f6c63a902872cf77b3d554e14ed1b7/ballontranslator/modules/textdetector/ctd/inference.py#L206-L220
     let source = image.to_rgb8();
     let mut resized = RgbImage::new(resized_width, resized_height);
     Resizer::new()
@@ -57,12 +67,11 @@ pub fn preprocess(image: &DynamicImage, device: Device) -> Result<(Tensor, [u32;
             &ResizeOptions::new().resize_alg(ResizeAlg::Interpolation(FilterType::Bilinear)),
         )
         .map_err(|error| anyhow!("failed to resize comic text detector input: {error}"))?;
-    let mut letterboxed = RgbImage::new(1280, 1280);
+    let mut letterboxed = RgbImage::new(size, size);
     image::imageops::replace(&mut letterboxed, &resized, 0, 0);
-    let pixel_values = image_to_tensor(&DynamicImage::ImageRgb8(letterboxed), device)?;
 
     Ok((
-        pixel_values,
+        letterboxed,
         [
             original_width,
             original_height,
@@ -77,20 +86,47 @@ pub fn postprocess(
     dimensions: [u32; 4],
     source: &DynamicImage,
 ) -> Result<(GrayImage, Vec<TextBlock>)> {
+    let [_, _, resized_width, resized_height] = dimensions;
+    let maps = Tensor::cat(&[outputs.mask, outputs.line_maps], 1)
+        .narrow(2, 0, resized_height as i64)
+        .narrow(3, 0, resized_width as i64);
+    let mask = tensor_to_f32_vec(maps.narrow(1, 0, 1).contiguous().view([-1]))?;
+    let shrink = tensor_to_f32_vec(maps.narrow(1, 1, 1).contiguous().view([-1]))?;
+    decode_maps(&mask, &shrink, dimensions, source)
+}
+
+/// Decodes the text-mask and DBNet shrink maps once they are on the host.
+///
+/// Both planes are cropped to `resized_width`×`resized_height`, the letterboxed
+/// content area reported by [`letterbox`]. Backends that are not Torch share
+/// this decoding so their output stays identical to the reference port.
+pub(crate) fn decode_maps(
+    mask: &[f32],
+    shrink: &[f32],
+    dimensions: [u32; 4],
+    source: &DynamicImage,
+) -> Result<(GrayImage, Vec<TextBlock>)> {
     let [
         original_width,
         original_height,
         resized_width,
         resized_height,
     ] = dimensions;
-    let maps = Tensor::cat(&[outputs.mask, outputs.line_maps], 1)
-        .narrow(2, 0, resized_height as i64)
-        .narrow(3, 0, resized_width as i64);
-    // Upstream converts the cropped maps to uint8 before resizing the mask
-    // back to the caller's dimensions.
-    let values = tensor_to_u8_vec(maps.narrow(1, 0, 1).contiguous().view([-1]))?;
     let resized_plane = resized_width as usize * resized_height as usize;
-    let map = gray_from_slice(resized_width, resized_height, &values[..resized_plane])?;
+    if mask.len() != resized_plane || shrink.len() != resized_plane {
+        bail!(
+            "comic text detector maps hold {} and {} values, expected {resized_plane}",
+            mask.len(),
+            shrink.len()
+        );
+    }
+    // Upstream converts the cropped maps to uint8 before resizing the mask
+    // back to the caller's dimensions; the cast truncates like Torch's.
+    let values = mask
+        .iter()
+        .map(|value| (value.clamp(0.0, 1.0) * 255.0) as u8)
+        .collect::<Vec<_>>();
+    let map = gray_from_slice(resized_width, resized_height, &values)?;
     let mut raw_mask = GrayImage::new(original_width, original_height);
     Resizer::new()
         .resize(
@@ -99,10 +135,9 @@ pub fn postprocess(
             &ResizeOptions::new().resize_alg(ResizeAlg::Interpolation(FilterType::Bilinear)),
         )
         .map_err(|error| anyhow!("failed to resize comic text detector map: {error}"))?;
-    let shrink = tensor_to_f32_vec(maps.narrow(1, 1, 1).contiguous().view([-1]))?;
 
     let lines = extract_line_polygons(
-        &shrink,
+        shrink,
         resized_width,
         resized_height,
         original_width,
@@ -339,16 +374,6 @@ fn image_to_tensor(image: &DynamicImage, device: Device) -> Result<Tensor> {
         .to_device(device)
         .to_kind(Kind::Float))
         / 255.0)
-}
-
-fn tensor_to_u8_vec(tensor: Tensor) -> Result<Vec<u8>> {
-    let tensor = tensor.clamp(0.0, 1.0) * 255.0;
-    let tensor = tensor
-        .to_kind(Kind::Uint8)
-        .to_device(Device::Cpu)
-        .contiguous()
-        .view([-1]);
-    Ok(Vec::<u8>::try_from(&tensor)?)
 }
 
 fn tensor_to_f32_vec(tensor: Tensor) -> Result<Vec<f32>> {

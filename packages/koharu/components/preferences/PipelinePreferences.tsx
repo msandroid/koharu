@@ -162,11 +162,14 @@ function ModelOptions({
           />
         </div>
       )
+    case 'comic-text-detector-onnx':
     case 'paddleocr-vl-1.6':
     case 'manga-ocr':
+    case 'manga-ocr-onnx':
     case 'baberu-ocr':
     case 'hayai-ocr':
     case 'lama':
+    case 'lama-onnx':
     case 'aot-inpainting':
       return null
   }

@@ -72,6 +72,9 @@ thiserror = "2.0.21"
 blake3 = "1.8.7"
 dunce = "1.0.5"
 rayon = "1.12.0"
+# ONNX Runtime is loaded at run time: mobile apps bundle the platform build and desktop
+# callers point `ORT_DYLIB_PATH` at a shared library, so nothing links at build time.
+ort = { version = "=2.0.0-rc.13", default-features = false, features = ["std", "load-dynamic", "api-22", "coreml", "nnapi", "xnnpack"] }
 # disables `esaxx_fast` feature which is conflicting with `ort`
 tokenizers = { version = "0.23.2", features = ["onig"] }
 strum = { version = "0.28.0", features = ["derive"] }
